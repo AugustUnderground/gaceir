@@ -3,20 +3,57 @@ import coconut.convenience
 import os, time, datetime
 import torch as pt
 from torch.utils.data import TensorDataset, DataLoader
+import torch_optimizer as optim
+from torch.utils.tensorboard import SummaryWriter
+from fastprogress.fastprogress import master_bar, progress_bar
+import gym, gace
+import hace as ac
 
-## Global Computing Device Setting and Default
+## Defaults (as args later)
+verbose: bool     = True            # Print verbose debug output
+#num_envs: int     = os.sched_getaffinity(0) |> len |> (//)$(?,2)
+num_envs: int     = 42
+num_episodes: int = 42              # Number of episodes to play
+num_steps: int    = 25              # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
+num_epochs: int   = 100             # How many time steps to update policy
+early_stop: float = -50.0           # Early stop criterion
+batch_size: int   = 42              # size of the batches during epoch
+act_std: float    = 0.25            # standard deviation action distribution
+rng_seed: int     = 666             # Random seed for reproducability
+algorithm: str    = "ppo"           # Name of used algorithm ∈  ./algorithm
+ace_id: str       = "op2"           # ACE Identifier of the Environment
+ace_backend: str  = "xh035"         # PDK/Technology backend of the ACE Environment
+ace_variant: int  = 0               # ACE Environment variant
+ε: float          = 0.2             # Factor for clipping
+η: float          = 0.001           # Factor in loss function
+γ: float          = 0.99            # Discount Factor
+τ: float          = 0.95            # Avantage Factor
+α: float          = 1e-3            # Learning Rate
+βs: tuple[float]  = (β1, β2) where: # Weight Decay
+    β1: float     = 0.9
+    β2: float     = 0.999
+
+## Setup
+env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
+time_stamp: str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+model_dir: str  = f"./models/{time_stamp}-{env_id}-{algorithm}"
+model_path: str = f"{model_dir}/checkpoint.pt"
+log_dir: str    = f"./runs/{time_stamp}-{env_id}-{algorithm}/"
+os.makedirs(model_dir, exist_ok = True)
+
+## Setup Globals
 device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
+writer = SummaryWriter(log_dir = log_dir, flush_secs = 30)
+_      = rng_seed |> pt.manual_seed
 
-def set_device(dev: pt.device) = device where:
-    global device
-    device = dev
+## Environment setup
+envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+#obs_dim: int = envs.observation_space[0].shape[0]
+obs_dim: int = envs$[0].target |> len |> (*)$(3)
+#obs_dim: int = envs$[0].target |> len |> (*)$(2)
+act_dim: int = envs.action_space[0].shape[0]
 
 ## Algorithm parameter defaults
-ε: float = 0.2   # Factor for clipping
-η: float = 0.001 # Factor in loss function
-γ: float = 0.99  # Discount Factor
-τ: float = 0.95  # Avantage Factor
-
 ## Network Generators for ACE Environments
 #def op_actor(obs_dim: int, act_dim: int) = actor where:
 #    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512)    , pt.nn.Tanh()
@@ -161,3 +198,95 @@ def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
               |> zip$(["actor", "critic", "optimizer", "deviation"],?) \
               |> dict
     pt.save(save_dict, checkpoint_file)
+
+def write_performance(env: gym.Env, step: int) = performance where:
+    target      = env.target
+    performance = env |> .ace |> ac.current_performance
+    for k in target.keys():
+        writer.add_scalars( k, { "performance": performance[k]
+                               , "target": target[k] }
+                          , step )
+
+def run_episode(_, _, True, loss, reward) = (loss, reward)
+addpattern def run_episode( episode, states, _, loss, reward
+                          ) = run_episode( episode, next_states, done, loss_, reward_  
+                                         )  where:
+    def traject((memories,states), step) = (memories_, states_) where:
+        t0             = time.time()
+        memory,states_ = trajectories(actor_critic, envs, states)
+        memories_      = [memory] + memories
+        t1             = time.time()
+        if verbose:
+            print(f"Step {step:03}/{num_steps} took {(t1 - t0):.3f}s | Average Reward: {memory[3].mean():.3f}")
+        writer.add_scalars("Mean_Step_Reward", {f"Episode_{episode}": memory[3].mean()}, step)
+        _              = envs |> .gace_envs |> .[0] |> write_performance$(?, step)
+    def train(epoch, loader) = loss |> pt.mean where:
+        t0   = time.time()
+        loss = starmap(update, loader) |> list |> pt.stack
+        t1   = time.time()
+        if verbose:
+            print(f"Epoch {epoch:03}/{num_epochs} took {(t1 - t0):.3f}s | Average Loss: {loss.mean():.3f}")
+        writer.add_scalars("Mean_Epoch_Loss", {f"Episode_{episode}": loss.mean().item()}, epoch)
+        writer.add_scalars("Sum_Epoch_Loss", {f"Episode_{episode}": loss.sum().item()}, epoch)
+    _          = policy.eval()
+    with pt.no_grad(): 
+        memories_,next_states \
+               = reduce(traject, range(num_steps), ([], states))
+    states,actions,logprobs,rewards,values,masks \
+               = memories_[:-1] |*> zip |> fmap$(pt.cat) |> tuple
+    _,_,_,_,values_,_ \
+               = memories_[1:] |*> zip |> fmap$(pt.cat) |> tuple
+    returns    = gae(rewards, values, masks, values_)
+    advantages = returns - values
+    _          = policy.train()
+    loader     = (states, actions, logprobs, returns, advantages) \
+               |*> TensorDataset \
+               |> DataLoader$(?, batch_size = batch_size, shuffle = True)
+    losses     = [ train(epoch, loader) for epoch in num_epochs |> range 
+                 ] |> pt.stack |> .detach()
+    done_      = .item() .. pt.all .. .bool() <| (1 - masks)
+    stop_      = rewards.mean().item() < early_stop
+    done       = done_ or stop_
+    loss_      = pt.cat((loss, losses))
+    reward_    = pt.cat((reward, rewards))
+    if verbose:
+        if done:
+            print(f"``'-.,_,.-'``'-.,_,.='``'-., All Environments Done ,.-'``'-.,_,.='``'-.,_,.='``")
+        else:
+            print(f"Episode {episode:03}/{num_episodes} | Average Reward {rewards.mean().item():.3f}")
+    writer.add_scalar("Mean_Episode_Reward", rewards.mean().item(), episode)
+
+def run_episodes(episode: int) = (losses,rewards) where:
+    if verbose:
+        print(f"``'-.,_,.-'``'-.,_,.='``'-., Starting Episode {episode:03} ,.-'``'-.,_,.='``'-.,_,.='``")
+    states = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
+    l = r = pt.empty(0) |> .to(device = device)
+    losses,rewards = run_episode(episode, states, False, l, r)
+    writer.add_scalar(f"Mean_Epsiode_Loss", losses.mean().item(), episode)
+    writer.add_scalar(f"Total_Episode_Reward", rewards.sum().item(), episode)
+    for i in losses |> len |> range:
+        writer.add_scalars(f"Epsiode_Loss", {f"Episode_{episode}": losses[i]}, i)
+        writer.add_scalars(f"Epsiode_Reward", {f"Episode_{episode}": rewards[i]}, i)
+    if verbose:
+        print(f"Episode {episode:03} | Total Reward: {rewards.sum():.3f}")
+        print(f"Episode {episode:03} | Average Loss: {losses.mean():.3f}")
+        print(f"``'-.,_,.-'``'-.,_,.='``'-., Finished Episode {episode:03} ,.-'``'-.,_,.='``'-.,_,.='``")
+
+## Actor Critic Model
+actor: pt.nn.Module        = op_actor(obs_dim, act_dim) |> .to(device)
+critic: pt.nn.Module       = op_critic(obs_dim) |> .to(device)
+#deviation: pt.nn.Parameter = std_deviation(act_dim, act_std) |> .to(device)
+policy: pt.nn.ModuleList   = pt.nn.ModuleList([actor, critic])
+
+actor_critic: function     = continuous_actor_critic$(actor, critic, act_std)
+#actor_critic: function     = continuous_actor_critic$(actor, critic, deviation)
+#actor_critic: function     = discrete_actor_critic$(actor, critic)
+
+optimizer: pt.optim        = pt.optim.Adam(policy.parameters(), lr = α, betas = βs)
+#actor_optim: pt.optim      = pt.optim.Adam(actor.parameters(), lr = α, betas = βs)
+#critic_optim: pt.optim     = pt.optim.Adam(critic.parameters(), lr = α, betas = βs)
+
+#update: function           = update_policy$(actor_critic, actor_optim, critic_optim)
+update: function           = update_policy$(actor_critic, optimizer)
+
+
