@@ -1,0 +1,163 @@
+import coconut.convenience
+
+import os, time, datetime
+import torch as pt
+from torch.utils.data import TensorDataset, DataLoader
+
+## Global Computing Device Setting and Default
+device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
+
+def set_device(dev: pt.device) = device where:
+    global device
+    device = dev
+
+## Algorithm parameter defaults
+ε: float = 0.2   # Factor for clipping
+η: float = 0.001 # Factor in loss function
+γ: float = 0.99  # Discount Factor
+τ: float = 0.95  # Avantage Factor
+
+## Network Generators for ACE Environments
+#def op_actor(obs_dim: int, act_dim: int) = actor where:
+#    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512)    , pt.nn.Tanh()
+#                            , pt.nn.Linear(512    , 1024)   , pt.nn.Tanh()
+#                            , pt.nn.Linear(1024   , 512)    , pt.nn.Tanh()
+#                            , pt.nn.Linear(512    , 256)    , pt.nn.Tanh()
+#                            , pt.nn.Linear(256    , 128)    , pt.nn.Tanh()
+#                            , pt.nn.Linear(128    , 64)     , pt.nn.Tanh()
+#                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+#
+#def op_critic(obs_dim: int) = critic where:
+#    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512) , pt.nn.Tanh()
+#                             , pt.nn.Linear(512    , 1024), pt.nn.Tanh()
+#                             , pt.nn.Linear(1024   , 512) , pt.nn.Tanh()
+#                             , pt.nn.Linear(512    , 256) , pt.nn.Tanh()
+#                             , pt.nn.Linear(256    , 128) , pt.nn.Tanh()
+#                             , pt.nn.Linear(128    , 64)  , pt.nn.Tanh()
+#                             , pt.nn.Linear(64     , 1) )
+
+def op_actor(obs_dim: int, act_dim: int) = actor where:
+    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128)    , pt.nn.Tanh()
+                            , pt.nn.Linear(128    , 256)    , pt.nn.Tanh()
+                            , pt.nn.Linear(256    , 128)    , pt.nn.Tanh()
+                            , pt.nn.Linear(128    , 64)     , pt.nn.Tanh()
+                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+
+def op_critic(obs_dim: int) = critic where:
+    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128), pt.nn.Tanh()
+                             , pt.nn.Linear(128    , 256), pt.nn.Tanh()
+                             , pt.nn.Linear(256    , 128), pt.nn.Tanh()
+                             , pt.nn.Linear(128    , 64) , pt.nn.Tanh()
+                             , pt.nn.Linear(64     , 1)  )
+
+def st1_actor(obs_dim: int = 12, act_dim: int = 6) = actor where:
+    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64)     , pt.nn.Tanh()
+                            , pt.nn.Linear(64     , 64)     , pt.nn.Tanh()
+                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+
+def st1_critic(obs_dim: int = 12) = critic where:
+    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64), pt.nn.Tanh()
+                             , pt.nn.Linear(64     , 64), pt.nn.Tanh()
+                             , pt.nn.Linear(64     , 1) )
+
+def nand4_actor(obs_dim: int = 12, act_dim: int = 5) = actor where:
+    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64)     , pt.nn.Tanh()
+                            , pt.nn.Linear(64     , 64)     , pt.nn.Tanh()
+                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+
+def nand4_critic(obs_dim: int = 12) = critic where:
+    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64), pt.nn.Tanh()
+                             , pt.nn.Linear(64     , 64), pt.nn.Tanh()
+                             , pt.nn.Linear(64     , 1) )
+
+def std_deviation(act_dim: int, act_std: float = 0.0) = std where:
+    std = act_dim |> pt.ones$(1,?) |> (*)$(?,act_std)
+
+def continuous_actor_critic( actor: pt.nn.Module, critic: pt.nn.Module
+                           , std: float, states: pt.Tensor 
+                           ) = (π, v) where:
+    μ = actor(states)
+    #σ = std |> .expand_as(μ) |> pt.diag_embed |> .to(device)
+    σ = μ |> .shape |> .[1] |> pt.eye |> (*)$(?,std) |> .to(device)
+    π = pt.distributions.MultivariateNormal(μ, σ)
+    v = critic(states) |> .squeeze()
+
+def discrete_actor_critic(actor, critic, states) = (π, v) where:
+    μ = actor(states)
+    π = pt.distributions.Categorical(μ)
+    v = critic(states) |> .squeeze()
+
+def update_policy( actor_critic: function, optimizer: pt.optim # optim_act: pt.optim, optim_crt: pt.optim
+                 , states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
+                 , returns:pt.Tensor, advantages: pt.Tensor 
+                 ) = losses.detach() where:
+    dist,values = actor_critic(states)
+    entropy     = dist |> .entropy() |> .mean()
+    logprobs_   = dist.log_prob(actions)
+    ratios      = (logprobs_ - logprobs) |> pt.exp
+    surr_1      = ratios * advantages
+    surr_2      = pt.clamp(ratios, 1.0 - ε, 1.0 + ε) * advantages
+    loss_act    = (surr_1, surr_2) |*> pt.min |> (-)
+    loss_crt    = (returns - values) |> pt.pow$(?,2) |> pt.mean
+    losses      = 0.5 * loss_crt + loss_act - η * entropy
+    _           = optimizer         |> .zero_grad()
+    _           = losses |> pt.mean |> .backward()
+    _           = optimizer         |> .step()
+    #_           = optim_act |> .zero_grad()
+    #_           = loss_act  |> .mean() |> .backward()
+    #_           = optim_act |> .step()
+    #_           = optim_crt |> .zero_grad()
+    #_           = loss_crt  |> .mean() |> .backward()
+    #_           = optim_crt |> .step()
+
+def subset(obs, inf, pre) = sub where:
+    sub = [ [ i["output-parameters"].index(p)
+              for p in i["output-parameters"] if p.startswith(pre)
+            ] for i in inf 
+          ] |> zip$(?,obs) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
+            |> list |> pt.vstack |> .to(device) |> .detach()
+
+def postprocess(observations, infos) = states where:
+    #performances = subset(observations, infos, "performance") \
+    #             / subset(observations, infos, "target")
+    #distances    = subset(observations, infos, "distance")
+    #states       = (performances, distances) |> pt.hstack
+    states = [ [ i["output-parameters"].index(p) for p in i["output-parameters"] 
+                 if ["performance", "target", "distance"] |> fmap$(p.startswith, ?) |> any 
+               ] for i in infos 
+             ] |> zip$(?,observations) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
+               |> list |> pt.vstack |> .to(device) |> .detach()
+    #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
+
+def trajectories( actor_critic: function, envs: gace.envs.vec.VecACE
+                , states: pt.Tensor ) = (memories, next_states) where:
+    dist,values = actor_critic(states)
+    actions     = dist |> .sample() |> .detach()
+    logprobs    = actions |> dist.log_prob
+    observations,rewards_,dones,infos \
+                = actions |> pt.split$(?,1) \
+                          |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
+                          |> list |> envs.step
+    next_states = postprocess(observations, infos)
+    masks       = dones |> pt.Tensor |> .to(device) |> (-)$(1,?)
+    rewards     = rewards_ |> pt.Tensor |> .to(device)
+    memories    = (states,actions,logprobs,rewards,values,masks)
+
+def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
+       , γ: float = 0.99, τ: float = 0.95 ) = a where:
+    δ = r + γ * v_ * m - v
+    l = δ |> .shape |> .[0] |> range |> reversed
+    i = pt.Tensor([0]).to(device)
+    g = reduce( (g_,i_) -> δ[i_] + γ * τ * m[i_] * g_[0] |> (,)$(?,g_) |> pt.hstack
+              , l, i ) |> .[:-1]
+    a = v + g
+
+def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
+                   , deviation: pt.nn.Module, optimizer: pt.optim
+                   , checkpoint_file: str) = True where:
+    state_dicts = [actor, critic, optimizer] |> fmap$(.state_dict()) \
+                                             |> (+)$(?,[deviation])
+    save_dict = state_dicts \
+              |> zip$(["actor", "critic", "optimizer", "deviation"],?) \
+              |> dict
+    pt.save(save_dict, checkpoint_file)
