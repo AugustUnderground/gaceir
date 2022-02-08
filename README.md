@@ -1,6 +1,6 @@
 # gAC²Eir
 
-<code align="center">
+```
                       ▓▓▓▓▓▓▓▓  ▓▓                        
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                      
                   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                    
@@ -26,8 +26,7 @@
     ██████████████████████████████████████████            
           ██████████████████████████████████████          
                       ██████████████████                  
-
-</code>
+```
 
 Reinforment Learning Agents for solving
 [GAC²E](https://github.com/augustunderground/gace).

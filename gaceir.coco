@@ -1,14 +1,13 @@
 import coconut.convenience
 import algorithm.ppo as ppo
-
 import os, time, datetime
 import torch as pt
 import hace as ac
 import gym, gace
 
-## Agent Training
 losses, rewards = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#losses, rewards = [run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
 
-#states = ppo.envs.reset() |> fmap$pt.from_numpy |> pt.vstack |> .to(device)
-#losses,rewards = ppo.run_episode(states, False, pt.empty(0), pt.empty(0))
+losses, rewards = [run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
+
+states = ppo.envs.reset() |> fmap$pt.from_numpy |> pt.vstack |> .to(device)
+losses,rewards = ppo.run_episode(states, False, pt.empty(0), pt.empty(0))
