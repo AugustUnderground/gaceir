@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# __coconut_hash__ = 0xf878cd63
+# __coconut_hash__ = 0x8c55f11e
 
 # Compiled with Coconut version 2.0.0-a_dev33 [How Not to Be Seen]
 
@@ -1158,22 +1158,314 @@ _coconut_MatchError, _coconut_count, _coconut_enumerate, _coconut_filter, _cocon
 # Compiled Coconut: -----------------------------------------------------------
 
 import coconut.convenience  #1 (line num in coconut source)
-#import algorithm.ppo as ppo
-from algorithm import td3  #3 (line num in coconut source)
-import os  #4 (line num in coconut source)
-import time  #4 (line num in coconut source)
-import datetime  #4 (line num in coconut source)
-import torch as pt  #5 (line num in coconut source)
-import hace as ac  #6 (line num in coconut source)
-import gym  #7 (line num in coconut source)
-import gace  #7 (line num in coconut source)
 
-## TD3
-memory = (tuple)((zip)(*[td3.run_episodes(e) for e in range(2)]))  #10 (line num in coconut source)
-#memory = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
+import os  #3 (line num in coconut source)
+import time  #3 (line num in coconut source)
+import datetime  #3 (line num in coconut source)
+from collections import namedtuple  #4 (line num in coconut source)
+from itertools import repeat  #5 (line num in coconut source)
+import torch as pt  #6 (line num in coconut source)
+from torch.utils.data import TensorDataset  #7 (line num in coconut source)
+from torch.utils.data import DataLoader  #7 (line num in coconut source)
+import torch_optimizer as optim  #8 (line num in coconut source)
+from torch.utils.tensorboard import SummaryWriter  #9 (line num in coconut source)
+from fastprogress.fastprogress import master_bar  #10 (line num in coconut source)
+from fastprogress.fastprogress import progress_bar  #10 (line num in coconut source)
+import gym  #11 (line num in coconut source)
+import gace  #11 (line num in coconut source)
+import hace as ac  #12 (line num in coconut source)
 
-## PPO
-#losses, rewards = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#losses, rewards = [run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
-#states = ppo.envs.reset() |> fmap$pt.from_numpy |> pt.vstack |> .to(device)
-#losses,rewards = ppo.run_episode(states, False, pt.empty(0), pt.empty(0))
+## Defaults (as args later)
+verbose: bool = True  # Print verbose debug output  #15 (line num in coconut source)
+#num_envs: int        = os.sched_getaffinity(0) |> len |> (//)$(?,2)
+num_envs: int = 42  # Number of parallel env pool  #17 (line num in coconut source)
+num_episodes: int = 42  # Number of episodes to play  #18 (line num in coconut source)
+num_steps: int = 25  # How many steps to take -> num_steps × num_envs = n_points ∈  data_set  #19 (line num in coconut source)
+max_steps: int = 100  # How many steps to take -> num_steps × num_envs = n_points ∈  data_set  #20 (line num in coconut source)
+num_epochs: int = 100  # How many time steps to update policy  #21 (line num in coconut source)
+early_stop: float = -50.0  # Early stop criterion  #22 (line num in coconut source)
+batch_size: int = 256  # size of the batches during epoch  #23 (line num in coconut source)
+act_std: float = 0.25  # standard deviation action distribution  #24 (line num in coconut source)
+rng_seed: int = 666  # Random seed for reproducability  #25 (line num in coconut source)
+algorithm: str = "td3"  # Name of used algorithm ∈  ./algorithm  #26 (line num in coconut source)
+ace_id: str = "op2"  # ACE Identifier of the Environment  #27 (line num in coconut source)
+ace_backend: str = "xh035"  # PDK/Technology backend of the ACE Environment  #28 (line num in coconut source)
+ace_variant: int = 0  # ACE Environment variant  #29 (line num in coconut source)
+γ: float = 0.99  # Discount Factor  #30 (line num in coconut source)
+τ_soft: float = 1e-2  # Avantage Factor  #31 (line num in coconut source)
+α: float = 1e-4  # Learning Rate  #32 (line num in coconut source)
+β1: float = 0.9  #34 (line num in coconut source)
+β2: float = 0.999  #35 (line num in coconut source)
+βs: tuple[float] = (β1, β2)  #36 (line num in coconut source)
+exp_noise: float = 0.15  #36 (line num in coconut source)
+pol_noise: float = 0.2  #37 (line num in coconut source)
+clp_noise: float = 0.5  #38 (line num in coconut source)
+update_interval: int = 2  #39 (line num in coconut source)
+buffer_size: int = (int)(1e7)  #40 (line num in coconut source)
+warmup_periode: int = 100  #41 (line num in coconut source)
+
+## Setup
+env_id: str = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"  #44 (line num in coconut source)
+time_stamp: str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  #45 (line num in coconut source)
+model_dir: str = f"./models/{time_stamp}-{env_id}-{algorithm}"  #46 (line num in coconut source)
+model_path: str = f"{model_dir}/checkpoint.pt"  #47 (line num in coconut source)
+log_dir: str = f"./runs/{time_stamp}-{env_id}-{algorithm}/"  #48 (line num in coconut source)
+os.makedirs(model_dir, exist_ok=True)  #49 (line num in coconut source)
+
+## Setup Globals
+device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")  #52 (line num in coconut source)
+writer = SummaryWriter(log_dir=log_dir, flush_secs=30)  #53 (line num in coconut source)
+_ = (pt.manual_seed)(rng_seed)  #54 (line num in coconut source)
+
+## Environment setup
+envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)  #57 (line num in coconut source)
+#obs_dim: int = envs.observation_space[0].shape[0]
+obs_dim: int = ((_coconut.operator.mul))(3, (len)(_coconut_iter_getitem(envs, 0).target))  #59 (line num in coconut source)
+#obs_dim: int = envs$[0].target |> len |> (*)$(2)
+act_dim: int = envs.action_space[0].shape[0]  #61 (line num in coconut source)
+
+q_loss = pt.nn.MSELoss()  #63 (line num in coconut source)
+
+## Utility
+def write_performance(env: gym.Env, step: int):  #66 (line num in coconut source)
+    target = env.target  #67 (line num in coconut source)
+    performance = (ac.current_performance)((env).ace)  #68 (line num in coconut source)
+    for k in target.keys():  #69 (line num in coconut source)
+        writer.add_scalars(k, {"performance": performance[k], "target": target[k]}, step)  #70 (line num in coconut source)
+
+## Replay Buffer
+    return performance  #75 (line num in coconut source)
+
+ReplayBuffer = namedtuple("ReplayBuffer", "state action reward next_state done")  #75 (line num in coconut source)
+
+def push(b: ReplayBuffer, t: tuple):  #77 (line num in coconut source)
+    b_ = ((fmap)(_coconut.operator.itemgetter((_coconut.slice(-buffer_size, None))), (ReplayBuffer)(*t)) if len(b.state) <= 0 else (ReplayBuffer)(*(fmap)(_coconut_forward_compose(pt.vstack, _coconut.operator.itemgetter((_coconut.slice(-buffer_size, None)))), zip(b, t))))  #78 (line num in coconut source)
+
+    return b_  #82 (line num in coconut source)
+
+def sample(b: ReplayBuffer, bs: int):  #82 (line num in coconut source)
+    i = (((pt.randperm)(((b.state).shape)[0]))[_coconut.slice(None, bs)]).tolist()  #83 (line num in coconut source)
+    s = (ReplayBuffer)(*(e[i, :] for e in b))  #84 (line num in coconut source)
+
+## Neural Networks
+    return s  #87 (line num in coconut source)
+
+class HStack(_coconut.collections.namedtuple("HStack", ()), pt.nn.Module):  #87 (line num in coconut source)
+    _coconut_is_data = True  #87 (line num in coconut source)
+    __slots__ = ()  #87 (line num in coconut source)
+    __ne__ = _coconut.object.__ne__  #87 (line num in coconut source)
+    def __eq__(self, other):  #87 (line num in coconut source)
+        return self.__class__ is other.__class__ and _coconut.tuple.__eq__(self, other)  #87 (line num in coconut source)
+    def __hash__(self):  #87 (line num in coconut source)
+        return _coconut.tuple.__hash__(self) ^ hash(self.__class__)  #87 (line num in coconut source)
+    __match_args__ = ()  #87 (line num in coconut source)
+    @_coconut_tco  #87 (line num in coconut source)
+    def forward(self, X: tuple[pt.Tensor, pt.Tensor]):  #87 (line num in coconut source)
+        return _coconut_tail_call((pt.hstack), X)  #88 (line num in coconut source)
+
+
+class VStack(_coconut.collections.namedtuple("VStack", ()), pt.nn.Module):  #90 (line num in coconut source)
+    _coconut_is_data = True  #90 (line num in coconut source)
+    __slots__ = ()  #90 (line num in coconut source)
+    __ne__ = _coconut.object.__ne__  #90 (line num in coconut source)
+    def __eq__(self, other):  #90 (line num in coconut source)
+        return self.__class__ is other.__class__ and _coconut.tuple.__eq__(self, other)  #90 (line num in coconut source)
+    def __hash__(self):  #90 (line num in coconut source)
+        return _coconut.tuple.__hash__(self) ^ hash(self.__class__)  #90 (line num in coconut source)
+    __match_args__ = ()  #90 (line num in coconut source)
+    @_coconut_tco  #90 (line num in coconut source)
+    def forward(self, X: tuple[pt.Tensor, pt.Tensor]):  #90 (line num in coconut source)
+        return _coconut_tail_call((pt.vstack), X)  #91 (line num in coconut source)
+
+## Critic
+
+def critic_net(obs_dim: int, act_dim: int):  #94 (line num in coconut source)
+    dim = obs_dim + act_dim  #95 (line num in coconut source)
+    crt_net = pt.nn.Sequential(HStack(), pt.nn.Linear(dim, 256), pt.nn.ReLU(), pt.nn.Linear(256, 128), pt.nn.ReLU(), pt.nn.Linear(128, 64), pt.nn.ReLU(), pt.nn.Linear(64, 1))  #96 (line num in coconut source)
+
+## Actor
+    return crt_net  #103 (line num in coconut source)
+
+def actor_net(obs_dim: int, act_dim: int):  #103 (line num in coconut source)
+    act_net = pt.nn.Sequential(pt.nn.Linear(obs_dim, 128), pt.nn.ReLU(), pt.nn.Linear(128, 256), pt.nn.ReLU(), pt.nn.Linear(256, 128), pt.nn.ReLU(), pt.nn.Linear(128, 64), pt.nn.ReLU(), pt.nn.Linear(64, act_dim), pt.nn.Tanh())  #104 (line num in coconut source)
+
+    return act_net  #110 (line num in coconut source)
+
+def soft_update(source, target, τ=1e-2):  #110 (line num in coconut source)
+    for param, target_param in zip(source.parameters(), target.parameters()):  #111 (line num in coconut source)
+        target_param.data.copy_(τ * param.data + (1 - τ) * target_param.data)  #112 (line num in coconut source)
+
+## Current Networks
+    return target  #115 (line num in coconut source)
+
+Q1 = (critic_net(obs_dim, act_dim)).to(device)  #115 (line num in coconut source)
+Q2 = (critic_net(obs_dim, act_dim)).to(device)  #116 (line num in coconut source)
+π = (actor_net(obs_dim, act_dim)).to(device)  #117 (line num in coconut source)
+
+## Target Networks
+θ1 = (critic_net(obs_dim, act_dim)).to(device)  #120 (line num in coconut source)
+θ2 = (critic_net(obs_dim, act_dim)).to(device)  #121 (line num in coconut source)
+φ = (actor_net(obs_dim, act_dim)).to(device)  #122 (line num in coconut source)
+
+## Initial Syncronization
+_ = soft_update(Q1, θ1, τ=1.0)  #125 (line num in coconut source)
+_ = soft_update(Q2, θ2, τ=1.0)  #126 (line num in coconut source)
+_ = soft_update(π, φ, τ=1.0)  #127 (line num in coconut source)
+
+## Optimizers
+q1_optim = pt.optim.Adam(Q1.parameters(), lr=α, betas=βs)  #130 (line num in coconut source)
+q2_optim = pt.optim.Adam(Q2.parameters(), lr=α, betas=βs)  #131 (line num in coconut source)
+π_optim = pt.optim.Adam(π.parameters(), lr=α, betas=βs)  #132 (line num in coconut source)
+
+## Exploitation
+def add_noise(a, t=0, lo=-1.0, hi=1.0, σ_max=1.0, σ_min=1.0, d=1000000):  #135 (line num in coconut source)
+    σ = σ_max - (σ_max - σ_min) * min(1.0, t / d)  #137 (line num in coconut source)
+    a_ = (_coconut_partial(pt.clip, {}, 1, min=lo, max=hi))((a + pt.randn_like(a) * σ))  #138 (line num in coconut source)
+
+    return a_  #140 (line num in coconut source)
+
+def random_action(envs):  #140 (line num in coconut source)
+    action = ((pt.vstack)((fmap)(_coconut_forward_compose(_coconut.operator.methodcaller("sample"), pt.from_numpy), envs.action_space))).to(device)  #141 (line num in coconut source)
+
+    return action  #144 (line num in coconut source)
+
+def select_action(net, state, step):  #144 (line num in coconut source)
+    with pt.no_grad():  #145 (line num in coconut source)
+        action = ((((_coconut_partial(add_noise, {}, 1, t=step))(((net)((((pt.Tensor)(state)).unsqueeze(0)).to(device))).detach())).cpu()).numpy())[0]  #146 (line num in coconut source)
+
+    return action  #149 (line num in coconut source)
+
+def policy_update(epoch, states):  #149 (line num in coconut source)
+    π_loss = ((_coconut_minus))(((Q1)((_coconut_partial((_coconut_comma_op), {0: states}, 2))((π)(states)))).mean())  #150 (line num in coconut source)
+    _ = π_optim.zero_grad()  #151 (line num in coconut source)
+    _ = π_loss.backward()  #152 (line num in coconut source)
+    _ = π_optim.step()  #153 (line num in coconut source)
+    _ = soft_update(Q1, θ1, τ=τ_soft)  #154 (line num in coconut source)
+    _ = soft_update(Q2, θ2, τ=τ_soft)  #155 (line num in coconut source)
+    _ = soft_update(π, φ, τ=τ_soft)  #156 (line num in coconut source)
+    _ = writer.add_scalar("π_loss", π_loss, epoch)  #157 (line num in coconut source)
+    if verbose:  #158 (line num in coconut source)
+        print(f"Actor Update {epoch:03}/{num_epochs}  | π Loss: {π_loss.item():.3f}")  #159 (line num in coconut source)
+
+    return π_loss  #161 (line num in coconut source)
+
+def update(epoch, buffer):  #161 (line num in coconut source)
+    states, actions, rewards, next_states, dones = (fmap)(_coconut.operator.methodcaller("to", device), sample(buffer, batch_size))  #162 (line num in coconut source)
+    noise = ((_coconut_partial(pt.clamp, {1: -clp_noise, 2: clp_noise}, 3))((_coconut_partial(pt.normal, {1: pol_noise}, 2))((pt.zeros)(actions.shape)))).to(device)  #164 (line num in coconut source)
+    next_actions = (_coconut_partial(pt.clamp, {1: -1.0, 2: 1.0}, 3))((_coconut_partial((_coconut.operator.add), {1: noise}, 2))((φ)(states)))  #167 (line num in coconut source)
+    q1_target = (θ1)((next_states, next_actions))  #168 (line num in coconut source)
+    q2_target = (θ2)((next_states, next_actions))  #169 (line num in coconut source)
+    q_target = pt.min(q1_target, q2_target)  #170 (line num in coconut source)
+    q_expected = ((rewards + (1.0 - dones) * γ * q_target)).detach()  #171 (line num in coconut source)
+    q1 = (Q1)((states, actions))  #172 (line num in coconut source)
+    q2 = (Q2)((states, actions))  #173 (line num in coconut source)
+    q1_loss = q_loss(q1, q_expected)  #174 (line num in coconut source)
+    q2_loss = q_loss(q2, q_expected)  #175 (line num in coconut source)
+    _ = q1_optim.zero_grad()  #176 (line num in coconut source)
+    _ = q1_loss.backward()  #177 (line num in coconut source)
+    _ = q1_optim.step()  #178 (line num in coconut source)
+    _ = q2_optim.zero_grad()  #179 (line num in coconut source)
+    _ = q2_loss.backward()  #180 (line num in coconut source)
+    _ = q2_optim.step()  #181 (line num in coconut source)
+    π_loss = (policy_update(epoch, states) if epoch in count(0, update_interval) else ((pt.tensor)(pt.nan)).to(device))  #182 (line num in coconut source)
+    _ = writer.add_scalar("q1_loss", q1_loss, epoch)  #185 (line num in coconut source)
+    _ = writer.add_scalar("q2_loss", q2_loss, epoch)  #186 (line num in coconut source)
+    if verbose:  #187 (line num in coconut source)
+        print(f"Critic Update {epoch:03}/{num_epochs} | Q1 Loss: {q1_loss.item():.3f}")  #188 (line num in coconut source)
+        print(f"                      | Q2 Loss: {q2_loss.item():.3f}")  #189 (line num in coconut source)
+
+## Exploration
+    return (q1_loss, q2_loss, π_loss)  #192 (line num in coconut source)
+
+def postprocess(observations, infos):  #192 (line num in coconut source)
+    states = (((pt.vstack)((list)((starmap)(_coconut_forward_compose((lambda i, o: o[i]), pt.from_numpy), (_coconut_partial(zip, {1: observations}, 2))([[i["output-parameters"].index(p) for p in i["output-parameters"] if (any)((_coconut_partial(fmap, {0: p.startswith}, 2))(["performance", "target", "distance"]))] for i in infos]))))).to(device)).detach()  #197 (line num in coconut source)
+#states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
+
+    return states  #204 (line num in coconut source)
+
+def explore(envs, step, states, buffer):  #204 (line num in coconut source)
+    actions = (random_action(envs) if (step * num_envs) < warmup_periode else select_action(π, states, step))  #206 (line num in coconut source)
+    t0 = time.time()  #209 (line num in coconut source)
+    observations, rewards_, dones_, infos = (envs.step)((list)((fmap)(_coconut_forward_compose(_coconut.operator.methodcaller("squeeze"), _coconut.operator.methodcaller("cpu"), _coconut.operator.methodcaller("numpy")), (_coconut_partial(pt.split, {1: 1}, 2))(actions))))  #210 (line num in coconut source)
+    next_states = postprocess(observations, infos)  #214 (line num in coconut source)
+    rewards = (((pt.Tensor)(rewards_)).to(device)).reshape(-1, 1)  #215 (line num in coconut source)
+    dones = (((pt.Tensor)(dones_)).to(device)).reshape(-1, 1)  #216 (line num in coconut source)
+    new_buffer = push(buffer, (states, actions, rewards, next_states, dones))  #217 (line num in coconut source)
+    t1 = time.time()  #218 (line num in coconut source)
+    _ = writer.add_scalar("Total_Reward", rewards.sum().item(), step)  #219 (line num in coconut source)
+    _ = (_coconut_partial(write_performance, {1: step}, 2))(_coconut_iter_getitem(envs, 0))  #220 (line num in coconut source)
+    if verbose:  #221 (line num in coconut source)
+        print(f"Step {step:03}/{num_steps} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")  #222 (line num in coconut source)
+
+## Run Episode until done
+    return (next_states, new_buffer)  #225 (line num in coconut source)
+
+@_coconut_mark_as_match  #225 (line num in coconut source)
+def run_episode(*_coconut_match_args, **_coconut_match_kwargs):  #225 (line num in coconut source)
+    _coconut_match_check_0 = False  #225 (line num in coconut source)
+    _coconut_match_set_name_buffer = _coconut_sentinel  #225 (line num in coconut source)
+    _coconut_FunctionMatchError = _coconut_get_function_match_error()  #225 (line num in coconut source)
+    if (_coconut.len(_coconut_match_args) == 4) and ("buffer" not in _coconut_match_kwargs) and (_coconut_match_args[3] is True):  #225 (line num in coconut source)
+        _coconut_match_temp_0 = _coconut_match_args[2] if _coconut.len(_coconut_match_args) > 2 else _coconut_match_kwargs.pop("buffer")  #225 (line num in coconut source)
+        if not _coconut_match_kwargs:  #225 (line num in coconut source)
+            _coconut_match_set_name_buffer = _coconut_match_temp_0  #225 (line num in coconut source)
+            _coconut_match_check_0 = True  #225 (line num in coconut source)
+    if _coconut_match_check_0:  #225 (line num in coconut source)
+        if _coconut_match_set_name_buffer is not _coconut_sentinel:  #225 (line num in coconut source)
+            buffer = _coconut_match_temp_0  #225 (line num in coconut source)
+    if not _coconut_match_check_0:  #225 (line num in coconut source)
+        raise _coconut_FunctionMatchError('def run_episode(_, _, buffer, True) = buffer', _coconut_match_args)  #225 (line num in coconut source)
+
+    return buffer  #225 (line num in coconut source)
+
+@_coconut_addpattern(run_episode)  #226 (line num in coconut source)
+@_coconut_tco  #226 (line num in coconut source)
+@_coconut_mark_as_match  #226 (line num in coconut source)
+def run_episode(*_coconut_match_args, **_coconut_match_kwargs):  #226 (line num in coconut source)
+    _coconut_match_check_1 = False  #226 (line num in coconut source)
+    _coconut_match_set_name_episode = _coconut_sentinel  #226 (line num in coconut source)
+    _coconut_match_set_name_states = _coconut_sentinel  #226 (line num in coconut source)
+    _coconut_match_set_name_buffer = _coconut_sentinel  #226 (line num in coconut source)
+    _coconut_match_set_name_done = _coconut_sentinel  #226 (line num in coconut source)
+    _coconut_FunctionMatchError = _coconut_get_function_match_error()  #226 (line num in coconut source)
+    if (_coconut.len(_coconut_match_args) <= 4) and (_coconut.sum((_coconut.len(_coconut_match_args) > 0, "episode" in _coconut_match_kwargs)) == 1) and (_coconut.sum((_coconut.len(_coconut_match_args) > 1, "states" in _coconut_match_kwargs)) == 1) and (_coconut.sum((_coconut.len(_coconut_match_args) > 2, "buffer" in _coconut_match_kwargs)) == 1) and (_coconut.sum((_coconut.len(_coconut_match_args) > 3, "done" in _coconut_match_kwargs)) == 1):  #226 (line num in coconut source)
+        _coconut_match_temp_1 = _coconut_match_args[0] if _coconut.len(_coconut_match_args) > 0 else _coconut_match_kwargs.pop("episode")  #226 (line num in coconut source)
+        _coconut_match_temp_2 = _coconut_match_args[1] if _coconut.len(_coconut_match_args) > 1 else _coconut_match_kwargs.pop("states")  #226 (line num in coconut source)
+        _coconut_match_temp_3 = _coconut_match_args[2] if _coconut.len(_coconut_match_args) > 2 else _coconut_match_kwargs.pop("buffer")  #226 (line num in coconut source)
+        _coconut_match_temp_4 = _coconut_match_args[3] if _coconut.len(_coconut_match_args) > 3 else _coconut_match_kwargs.pop("done")  #226 (line num in coconut source)
+        if not _coconut_match_kwargs:  #226 (line num in coconut source)
+            _coconut_match_set_name_episode = _coconut_match_temp_1  #226 (line num in coconut source)
+            _coconut_match_set_name_states = _coconut_match_temp_2  #226 (line num in coconut source)
+            _coconut_match_set_name_buffer = _coconut_match_temp_3  #226 (line num in coconut source)
+            _coconut_match_set_name_done = _coconut_match_temp_4  #226 (line num in coconut source)
+            _coconut_match_check_1 = True  #226 (line num in coconut source)
+    if _coconut_match_check_1:  #226 (line num in coconut source)
+        if _coconut_match_set_name_episode is not _coconut_sentinel:  #226 (line num in coconut source)
+            episode = _coconut_match_temp_1  #226 (line num in coconut source)
+        if _coconut_match_set_name_states is not _coconut_sentinel:  #226 (line num in coconut source)
+            states = _coconut_match_temp_2  #226 (line num in coconut source)
+        if _coconut_match_set_name_buffer is not _coconut_sentinel:  #226 (line num in coconut source)
+            buffer = _coconut_match_temp_3  #226 (line num in coconut source)
+        if _coconut_match_set_name_done is not _coconut_sentinel:  #226 (line num in coconut source)
+            done = _coconut_match_temp_4  #226 (line num in coconut source)
+    if not _coconut_match_check_1:  #226 (line num in coconut source)
+        raise _coconut_FunctionMatchError('addpattern def run_episode( episode, states, buffer, done\n    ) = run_episode( episode, next_states, new_buffer\n    , done_ or stop_ ) where:', _coconut_match_args)  #226 (line num in coconut source)
+
+    _ = (fmap)(_coconut.operator.attrgetter("eval"), [π, Q1, Q2, φ, θ1, θ2])  #229 (line num in coconut source)
+    expl = lambda sb, e: (_coconut_partial(explore, {0: envs, 1: e}, 3))(*sb)  #230 (line num in coconut source)
+    next_states, new_buffer = reduce(expl, (range)(num_steps), (states, buffer))  #231 (line num in coconut source)
+    done_ = (_coconut_forward_compose(_coconut.operator.attrgetter("done"), _coconut.operator.methodcaller("squeeze"), _coconut.operator.methodcaller("bool"), pt.all, _coconut.operator.methodcaller("item")))(new_buffer)  #233 (line num in coconut source)
+    stop_ = False  #new_buffer.rewards[-num_envs:].mean().item() < early_stop  #234 (line num in coconut source)
+    _ = (fmap)(_coconut.operator.attrgetter("train"), [π, Q1, Q2, φ, θ1, θ2])  #235 (line num in coconut source)
+    q1_loss, q2_loss, π_loss_ = (tuple)((_coconut.functools.partial(_coconut.functools.partial, fmap)(pt.hstack))((zip)(*[update(epoch, new_buffer) for epoch in (range)(num_epochs)])))  #236 (line num in coconut source)
+    π_loss = π_loss_[~π_loss_.isnan()]  #239 (line num in coconut source)
+
+    return _coconut_tail_call(run_episode, episode, next_states, new_buffer, done_ or stop_)  #241 (line num in coconut source)
+
+def run_episodes(episode: int):  #241 (line num in coconut source)
+    states = ((pt.vstack)((fmap)(_coconut_forward_compose(pt.from_numpy, _coconut.operator.itemgetter((_coconut.slice(None, obs_dim)))), envs.reset()))).to(device)  #242 (line num in coconut source)
+    buffer = (ReplayBuffer)(*(list)(_coconut_iter_getitem((repeat)(pt.empty(0)), (_coconut.slice(None, 5)))))  #243 (line num in coconut source)
+    memory = run_episode(episode, states, buffer, False)  #244 (line num in coconut source)
+
+
+    return memory  #246 (line num in coconut source)
