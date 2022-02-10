@@ -1,39 +1,12 @@
-# gAC²Eir
-
-```
-                      ▓▓▓▓▓▓▓▓  ▓▓                        
-                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                      
-                  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                    
-                ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                  
-                ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-              ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-              ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                  
-                ▓▓▓▓▓▓▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                      ▒▒▒▒▒▒▓▓▓▓▓▓▓▓▓▓▓▓                  
-                      ▒▒▒▒▒▒▒▒▒▒  ▓▓▓▓                    
-                    ████▒▒▒▒▒▒▒▒                          
-                  ████▒▒▒▒▒▒▒▒▒▒                          
-                  ██▒▒██████▒▒████                        
-                  ████▒▒██████▒▒████                      
-                ▓▓████▓▓▒▒██▓▓▓▓▒▒██▓▓▓▓                  
-              ████▓▓████▓▓██████▒▒██████▒▒▒▒              
-            ██████████████████▒▒████████████████          
-          ████████████████████▒▒████████████████████████  
-      ██████████████████████████████▓▓▓▓██████████████████
-  ██████████████████████████████████████████████████████  
-██████████████████████████████████████████████████████    
-    ████████████████████████████████████████████████      
-    ██████████████████████████████████████████            
-          ██████████████████████████████████████          
-                      ██████████████████                  
-```
+# gACÂ²Eir
 
 Reinforcement Learning Agents for solving
 [GAC²E](https://github.com/augustunderground/gace).
 Currently only AC Methods are implemented. I'm focusing on Continuous Control
 Agents. 
 
-**Note**: The equations are rendered in vim using [nabla.nvim](https://github.com/jbyuki/nabla.nvim).
+**Note**: The equations are rendered in vim using
+[nabla.nvim](https://github.com/jbyuki/nabla.nvim).
 
 # Notes on Algorithms
 
@@ -65,16 +38,16 @@ $$ L^{CPI} (\theta) = E_{t} ( \frac{\pi_{\theta} (a_{t} | s_{t})}{\pi_{\theta,ol
 Where
 - A: Advantage
 - E: Expectation
-- π: Actor Network returning Probability of an action a for a given state s at
+- Ï: Actor Network returning Probability of an action a for a given state s at
   a given time t
-- θ: Current network parameters
+- Î¸: Current network parameters
 
 $$ L^{CLIP} = E_{t} ( min(r_{t}(\theta) \cdot A_{t}, clip(r_{t}(\theta), 1 - \epsilon, 1 + \epsilon) \cdot A_{t} ) ) $$
 
 Where
-- ε ≈ 0.2
+- Îµ â 0.2
 
-**→ Pessimistic lower bound of loss**
+**â Pessimistic lower bound of loss**
 
 ##### Advantage
 
@@ -86,8 +59,8 @@ with
 $$ \delta_{t} = r_{t} + \gamma \cdot V(s_{t + 1}) - V(s_{t}) $$
 
 Where
-- V(sₜ): Critic output, aka Estimated Value (stored in memory)
-- λ ≈ 0.95
+- V(sâ): Critic output, aka Estimated Value (stored in memory)
+- Î» â 0.95
 
 #### Critic
 
@@ -101,10 +74,10 @@ $$ L^{VF} = MSE(return - value) $$
 
 $$ L^{CLIP + VF + S}_{t} (\theta) = E_{t} [ L^{CLIP}_{t} (\theta) - c_{1} \cdot L^{VF}_{t} (\theta) + c_{2} \cdot S[\pi_{\theta}](s_{t}) ] $$
 
-→ Gradient Ascent, **not** Descent!
+â Gradient Ascent, **not** Descent!
 
 - S: only used for shared AC Network
-- c₁ ≈ 0.5
+- câ â 0.5
 
 ## Twin Delayed Double Dueling Policy Gradient (TD3)
 
@@ -118,14 +91,14 @@ $$ L^{CLIP + VF + S}_{t} (\theta) = E_{t} [ L^{CLIP}_{t} (\theta) - c_{1} \cdot 
 
 ### Loss
 
-E%�U
+E%¡U
 
 Where
-- π: Policy Network with parameters φ
+- Ï: Policy Network with parameters Ï
 - Gradient of first critic w.r.t. actions chosen by critic
 - Gradient of policy network w.r.t. it's own parameters
 
-→ Chain rule applied to loss function
+â Chain rule applied to loss function
 
 ### Network Updates
 
@@ -135,12 +108,12 @@ $$ \theta \leftarrow \tau \cdot \theta_{i} + (1 - \tau) \cdot \theta_{i}' $$
 $$ \phi \leftarrow \tau \cdot \phi{i} + (1 - \tau) \cdot \phi{i}' $$
 
 Where 
-- τ ≈ 0.005
+- Ï â 0.005
 
 _Soft_ update with heavy weight on current target parameters vs. heavily
 discounted parameters of online network.
 
-→ Not every step, only after actor update.
+â Not every step, only after actor update.
 
 #### Actor
 
@@ -154,7 +127,7 @@ discounted parameters of online network.
 #### Critic
 
 - Randomly sample trajectories from replay buffer (s,a,r,s')
-- New states run π'(s') where π' is target actor
+- New states run Ï'(s') where Ï' is target actor
 - Add noise and clip
 
 $$ a^{~} \leftarrow \pi_{\phi'} (s') + \epsilon $$
@@ -162,9 +135,9 @@ with
 
 $$ \epsilon ~ clip(N(0, \sigma), -c, c) $$
 Where
-- σ ≈ 0.2, noise standard deviation
-- c ≈ 0.5, noise clipping
-- γ ≈ 0.99, discount factor
+- Ï â 0.2, noise standard deviation
+- c â 0.5, noise clipping
+- Î³ â 0.99, discount factor
 
 $$ y \leftarrow r + \gamma \cdot min( Q'_{\theta1}(s', a^{~}), Q'_{\theta1}(s', a^{~})) $$
 
@@ -180,12 +153,12 @@ and is modeled by reward scaling.
 $$ log( \pi (a|s) ) = log (\mu (a|s)) - \sum^{D}_{i=1} log ( 1 - tanh^{2} (a_{i}) ) $$
 
 Where
-- μ: Sample of a distribution (**NOT MEAN**)
-- π: Probability of selecting this particular action a given state s
+- Î¼: Sample of a distribution (**NOT MEAN**)
+- Ï: Probability of selecting this particular action a given state s
 
 ### Hyper Parameters
 
-- Target smoothing coefficient τ
+- Target smoothing coefficient Ï
 - target update interval
 - replay buffer size
 - gradient steps
@@ -195,8 +168,8 @@ Where
 $$ J = N^{-1} \cdot \sum log(\pi (a_{t} | s_{t})) - Q_{min}(s_{t}, a_{t}) $$
 
 Where
-- sₜ is sampled from replay buffer / memory
-- aₜ is generated with actor network given sampled states
+- sâ is sampled from replay buffer / memory
+- aâ is generated with actor network given sampled states
 - Qmin is minimum of 2 critics
 
 ### Value Update
@@ -204,9 +177,9 @@ Where
 $$ J = N^{-1} \cdot \sum \frac{1}{2} \cdot ( V(s_{t}) - Qmin (s_{t}, a_{t}) - log(\pi (a_{t} | s_{t})) ) $$
 
 Where
-- V(sₜ): sampled values from memory
-- sₜ: sampled states from memory
-- aₜ: newly computed actions
+- V(sâ): sampled values from memory
+- sâ: sampled states from memory
+- aâ: newly computed actions
 
 ### Critic
 
@@ -225,7 +198,7 @@ Where
 $$ \psi \leftarrow \tau \cdot \psi + (1 - \tau) \cdot \psi' $$
 
 Where
-- τ ≈ 0.005
+- Ï â 0.005
 
 ## Things TODO
 
@@ -237,4 +210,5 @@ Where
 - [ ] Include step count in reward
 - [ ] Try Discrete action spaces
 - [ ] Normalize and/or reduce observation space
-
+- [ ] consider previous reward
+- [ ] return trained models instead of loss

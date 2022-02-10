@@ -12,12 +12,12 @@ import hace as ac
 ## Defaults (as args later)
 verbose: bool     = True            # Print verbose debug output
 #num_envs: int     = os.sched_getaffinity(0) |> len |> (//)$(?,2)
-num_envs: int     = 42
+num_envs: int     = 50
 num_episodes: int = 42              # Number of episodes to play
 num_steps: int    = 25              # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
 num_epochs: int   = 100             # How many time steps to update policy
 early_stop: float = -50.0           # Early stop criterion
-batch_size: int   = 42              # size of the batches during epoch
+batch_size: int   = 100             # size of the batches during epoch
 act_std: float    = 0.25            # standard deviation action distribution
 rng_seed: int     = 666             # Random seed for reproducability
 algorithm: str    = "ppo"           # Name of used algorithm ∈  ./algorithm
@@ -53,59 +53,33 @@ obs_dim: int = envs$[0].target |> len |> (*)$(3)
 #obs_dim: int = envs$[0].target |> len |> (*)$(2)
 act_dim: int = envs.action_space[0].shape[0]
 
-## Algorithm parameter defaults
 ## Network Generators for ACE Environments
-#def op_actor(obs_dim: int, act_dim: int) = actor where:
-#    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512)    , pt.nn.Tanh()
-#                            , pt.nn.Linear(512    , 1024)   , pt.nn.Tanh()
-#                            , pt.nn.Linear(1024   , 512)    , pt.nn.Tanh()
-#                            , pt.nn.Linear(512    , 256)    , pt.nn.Tanh()
-#                            , pt.nn.Linear(256    , 128)    , pt.nn.Tanh()
-#                            , pt.nn.Linear(128    , 64)     , pt.nn.Tanh()
-#                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
-#
-#def op_critic(obs_dim: int) = critic where:
-#    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512) , pt.nn.Tanh()
-#                             , pt.nn.Linear(512    , 1024), pt.nn.Tanh()
-#                             , pt.nn.Linear(1024   , 512) , pt.nn.Tanh()
-#                             , pt.nn.Linear(512    , 256) , pt.nn.Tanh()
-#                             , pt.nn.Linear(256    , 128) , pt.nn.Tanh()
-#                             , pt.nn.Linear(128    , 64)  , pt.nn.Tanh()
-#                             , pt.nn.Linear(64     , 1) )
+def act_net(obs_dim: int, act_dim: int) = net where:
+    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128)    , pt.nn.Tanh()
+                          , pt.nn.Linear(128    , 256)    , pt.nn.Tanh()
+                          , pt.nn.Linear(256    , 128)    , pt.nn.Tanh()
+                          , pt.nn.Linear(128    , 64)     , pt.nn.Tanh()
+                          , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
 
-def op_actor(obs_dim: int, act_dim: int) = actor where:
-    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128)    , pt.nn.Tanh()
-                            , pt.nn.Linear(128    , 256)    , pt.nn.Tanh()
-                            , pt.nn.Linear(256    , 128)    , pt.nn.Tanh()
-                            , pt.nn.Linear(128    , 64)     , pt.nn.Tanh()
-                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+def crt_net(obs_dim: int) = net where:
+    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128), pt.nn.Tanh()
+                          , pt.nn.Linear(128    , 256), pt.nn.Tanh()
+                          , pt.nn.Linear(256    , 128), pt.nn.Tanh()
+                          , pt.nn.Linear(128    , 64) , pt.nn.Tanh()
+                          , pt.nn.Linear(64     , 1)  )
 
-def op_critic(obs_dim: int) = critic where:
-    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128), pt.nn.Tanh()
-                             , pt.nn.Linear(128    , 256), pt.nn.Tanh()
-                             , pt.nn.Linear(256    , 128), pt.nn.Tanh()
-                             , pt.nn.Linear(128    , 64) , pt.nn.Tanh()
-                             , pt.nn.Linear(64     , 1)  )
-
-def st1_actor(obs_dim: int = 12, act_dim: int = 6) = actor where:
-    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64)     , pt.nn.Tanh()
-                            , pt.nn.Linear(64     , 64)     , pt.nn.Tanh()
-                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
-
-def st1_critic(obs_dim: int = 12) = critic where:
-    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64), pt.nn.Tanh()
-                             , pt.nn.Linear(64     , 64), pt.nn.Tanh()
-                             , pt.nn.Linear(64     , 1) )
-
-def nand4_actor(obs_dim: int = 12, act_dim: int = 5) = actor where:
-    actor = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64)     , pt.nn.Tanh()
-                            , pt.nn.Linear(64     , 64)     , pt.nn.Tanh()
-                            , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
-
-def nand4_critic(obs_dim: int = 12) = critic where:
-    critic = pt.nn.Sequential( pt.nn.Linear(obs_dim, 64), pt.nn.Tanh()
-                             , pt.nn.Linear(64     , 64), pt.nn.Tanh()
-                             , pt.nn.Linear(64     , 1) )
+data Memory( states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
+           , rewards: pt.Tensor, values: pt.Tensor, masks: pt.Tensor ):
+    def __add__(self, other) = (self, other) |*> zip |> fmap$(pt.cat) |*> Memory
+    def data_loader():
+        states,actions,logprobs,rewards,values,masks \
+                   = self |> fmap$(.[:-1]) |*> Memory
+        values_    = self.values[1:]
+        returns    = gae(rewards, values, masks, values_)
+        advantages = returns - values
+        loader     = (states, actions, logprobs, returns, advantages) \
+                   |*> TensorDataset \
+                   |> DataLoader$(?, batch_size = batch_size, shuffle = True)
 
 def std_deviation(act_dim: int, act_std: float = 0.0) = std where:
     std = act_dim |> pt.ones$(1,?) |> (*)$(?,act_std)
@@ -124,7 +98,7 @@ def discrete_actor_critic(actor, critic, states) = (π, v) where:
     π = pt.distributions.Categorical(μ)
     v = critic(states) |> .squeeze()
 
-def update_policy( actor_critic: function, optimizer: pt.optim # optim_act: pt.optim, optim_crt: pt.optim
+def update_policy( actor_critic: function, optimizer: pt.optim
                  , states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
                  , returns:pt.Tensor, advantages: pt.Tensor 
                  ) = losses.detach() where:
@@ -140,12 +114,6 @@ def update_policy( actor_critic: function, optimizer: pt.optim # optim_act: pt.o
     _           = optimizer         |> .zero_grad()
     _           = losses |> pt.mean |> .backward()
     _           = optimizer         |> .step()
-    #_           = optim_act |> .zero_grad()
-    #_           = loss_act  |> .mean() |> .backward()
-    #_           = optim_act |> .step()
-    #_           = optim_crt |> .zero_grad()
-    #_           = loss_crt  |> .mean() |> .backward()
-    #_           = optim_crt |> .step()
 
 def subset(obs, inf, pre) = sub where:
     sub = [ [ i["output-parameters"].index(p)
@@ -178,7 +146,7 @@ def trajectories( actor_critic: function, envs: gace.envs.vec.VecACE
     next_states = postprocess(observations, infos)
     masks       = dones |> pt.Tensor |> .to(device) |> (-)$(1,?)
     rewards     = rewards_ |> pt.Tensor |> .to(device)
-    memories    = (states,actions,logprobs,rewards,values,masks)
+    memories    = Memory(states,actions,logprobs,rewards,values,masks)
 
 def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
        , γ: float = 0.99, τ: float = 0.95 ) = a where:
@@ -190,21 +158,18 @@ def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
     a = v + g
 
 def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
-                   , deviation: pt.nn.Module, optimizer: pt.optim
-                   , checkpoint_file: str) = True where:
-    state_dicts = [actor, critic, optimizer] |> fmap$(.state_dict()) \
-                                             |> (+)$(?,[deviation])
-    save_dict = state_dicts \
-              |> zip$(["actor", "critic", "optimizer", "deviation"],?) \
-              |> dict
-    pt.save(save_dict, checkpoint_file)
+                   , optimizer: pt.optim, checkpoint_file: str
+                   ) = res where:
+    state_dicts = [actor, critic, optimizer] |> fmap$(.state_dict())
+    save_dict   = state_dicts |> (,)$(["actor", "critic", "optimizer"],?) \
+                |*> zip |> dict
+    res = pt.save(save_dict, checkpoint_file)
 
-def write_performance(env: gym.Env, step: int) = performance where:
+def write_performance(env: gym.Env, step: int, episode: int) = performance where:
     target      = env.target
     performance = env |> .ace |> ac.current_performance
     for k in target.keys():
-        writer.add_scalars( k, { "performance": performance[k]
-                               , "target": target[k] }
+        writer.add_scalars( k, { "Episode_{episode}": performance[k] }
                           , step )
 
 def run_episode(_, _, True, loss, reward) = (loss, reward)
@@ -214,34 +179,26 @@ addpattern def run_episode( episode, states, _, loss, reward
     def traject((memories,states), step) = (memories_, states_) where:
         t0             = time.time()
         memory,states_ = trajectories(actor_critic, envs, states)
-        memories_      = [memory] + memories
+        memories_      = Memory + memories
         t1             = time.time()
         if verbose:
-            print(f"Step {step:03}/{num_steps} took {(t1 - t0):.3f}s | Average Reward: {memory[3].mean():.3f}")
-        writer.add_scalars("Mean_Step_Reward", {f"Episode_{episode}": memory[3].mean()}, step)
-        _              = envs |> .gace_envs |> .[0] |> write_performance$(?, step)
+            print(f"Step {step:03}/{num_steps} took {(t1 - t0):.3f}s | Average Reward: {memory.reward.mean():.3f}")
+        writer.add_scalars("_Mean_Step_Reward", {f"Episode_{episode}": memory.reward.mean()}, step)
+        _              = envs |> .gace_envs |> .[0] |> write_performance$(?, step, episode)
     def train(epoch, loader) = loss |> pt.mean where:
         t0   = time.time()
         loss = starmap(update, loader) |> list |> pt.stack
         t1   = time.time()
         if verbose:
             print(f"Epoch {epoch:03}/{num_epochs} took {(t1 - t0):.3f}s | Average Loss: {loss.mean():.3f}")
-        writer.add_scalars("Mean_Epoch_Loss", {f"Episode_{episode}": loss.mean().item()}, epoch)
-        writer.add_scalars("Sum_Epoch_Loss", {f"Episode_{episode}": loss.sum().item()}, epoch)
+        writer.add_scalars("_Mean_Epoch_Loss", {f"Episode_{episode}": loss.mean().item()}, epoch)
+        writer.add_scalars("_Sum_Epoch_Loss", {f"Episode_{episode}": loss.sum().item()}, epoch)
     _          = policy.eval()
     with pt.no_grad(): 
         memories_,next_states \
                = reduce(traject, range(num_steps), ([], states))
-    states,actions,logprobs,rewards,values,masks \
-               = memories_[:-1] |*> zip |> fmap$(pt.cat) |> tuple
-    _,_,_,_,values_,_ \
-               = memories_[1:] |*> zip |> fmap$(pt.cat) |> tuple
-    returns    = gae(rewards, values, masks, values_)
-    advantages = returns - values
     _          = policy.train()
-    loader     = (states, actions, logprobs, returns, advantages) \
-               |*> TensorDataset \
-               |> DataLoader$(?, batch_size = batch_size, shuffle = True)
+    loader     = data_loader(memories_)
     losses     = [ train(epoch, loader) for epoch in num_epochs |> range 
                  ] |> pt.stack |> .detach()
     done_      = .item() .. pt.all .. .bool() <| (1 - masks)
@@ -251,30 +208,32 @@ addpattern def run_episode( episode, states, _, loss, reward
     reward_    = pt.cat((reward, rewards))
     if verbose:
         if done:
-            print(f"``'-.,_,.-'``'-.,_,.='``'-., All Environments Done ,.-'``'-.,_,.='``'-.,_,.='``")
+            print(f"All Environments Done")
         else:
             print(f"Episode {episode:03}/{num_episodes} | Average Reward {rewards.mean().item():.3f}")
-    writer.add_scalar("Mean_Episode_Reward", rewards.mean().item(), episode)
+    _          = save_checkpoint(actor, critic, optimizer)
 
-def run_episodes(episode: int) = (losses,rewards) where:
+def run_episodes(episode: int) = (act,crt) where:
     if verbose:
-        print(f"``'-.,_,.-'``'-.,_,.='``'-., Starting Episode {episode:03} ,.-'``'-.,_,.='``'-.,_,.='``")
+        print(f"Starting Episode {episode:03}")
     states = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
     l = r = pt.empty(0) |> .to(device = device)
     losses,rewards = run_episode(episode, states, False, l, r)
-    writer.add_scalar(f"Mean_Epsiode_Loss", losses.mean().item(), episode)
-    writer.add_scalar(f"Total_Episode_Reward", rewards.sum().item(), episode)
+    writer.add_scalar(f"_Mean_Epsiode_Loss", losses.mean().item(), episode)
+    writer.add_scalar(f"_Total_Episode_Reward", rewards.sum().item(), episode)
     for i in losses |> len |> range:
         writer.add_scalars(f"Epsiode_Loss", {f"Episode_{episode}": losses[i]}, i)
         writer.add_scalars(f"Epsiode_Reward", {f"Episode_{episode}": rewards[i]}, i)
     if verbose:
         print(f"Episode {episode:03} | Total Reward: {rewards.sum():.3f}")
         print(f"Episode {episode:03} | Average Loss: {losses.mean():.3f}")
-        print(f"``'-.,_,.-'``'-.,_,.='``'-., Finished Episode {episode:03} ,.-'``'-.,_,.='``'-.,_,.='``")
+        print(f"Finished Episode {episode:03}")
+    act = .cpu() .. .eval() <| actor
+    crt = .cpu() .. .eval() <| critic
 
 ## Actor Critic Model
-actor: pt.nn.Module        = op_actor(obs_dim, act_dim) |> .to(device)
-critic: pt.nn.Module       = op_critic(obs_dim) |> .to(device)
+actor: pt.nn.Module        = act_net(obs_dim, act_dim) |> .to(device)
+critic: pt.nn.Module       = crt_net(obs_dim) |> .to(device)
 #deviation: pt.nn.Parameter = std_deviation(act_dim, act_std) |> .to(device)
 policy: pt.nn.ModuleList   = pt.nn.ModuleList([actor, critic])
 
@@ -288,5 +247,3 @@ optimizer: pt.optim        = pt.optim.Adam(policy.parameters(), lr = α, betas =
 
 #update: function           = update_policy$(actor_critic, actor_optim, critic_optim)
 update: function           = update_policy$(actor_critic, optimizer)
-
-
