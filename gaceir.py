@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# __coconut_hash__ = 0xf878cd63
+# __coconut_hash__ = 0x381d105
 
 # Compiled with Coconut version 2.0.0-a_dev33 [How Not to Be Seen]
 
@@ -1159,21 +1159,22 @@ _coconut_MatchError, _coconut_count, _coconut_enumerate, _coconut_filter, _cocon
 
 import coconut.convenience  #1 (line num in coconut source)
 #import algorithm.ppo as ppo
-from algorithm import td3  #3 (line num in coconut source)
-import os  #4 (line num in coconut source)
-import time  #4 (line num in coconut source)
-import datetime  #4 (line num in coconut source)
-import torch as pt  #5 (line num in coconut source)
-import hace as ac  #6 (line num in coconut source)
-import gym  #7 (line num in coconut source)
-import gace  #7 (line num in coconut source)
-
-## TD3
-memory = (tuple)((zip)(*[td3.run_episodes(e) for e in range(2)]))  #10 (line num in coconut source)
-#memory = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
+from algorithm.ppo import *  #3 (line num in coconut source)
+#import algorithm.td3 as td3
+import os  #5 (line num in coconut source)
+import time  #5 (line num in coconut source)
+import datetime  #5 (line num in coconut source)
+import torch as pt  #6 (line num in coconut source)
+import hace as ac  #7 (line num in coconut source)
+import gym  #8 (line num in coconut source)
+import gace  #8 (line num in coconut source)
 
 ## PPO
-#losses, rewards = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#losses, rewards = [run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
+actor, critic = (tuple)((zip)(*[ppo.run_episodes(e) for e in range(2)]))  #11 (line num in coconut source)
+#actor, critic = [run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
 #states = ppo.envs.reset() |> fmap$pt.from_numpy |> pt.vstack |> .to(device)
 #losses,rewards = ppo.run_episode(states, False, pt.empty(0), pt.empty(0))
+
+## TD3
+#models = [td3.run_episodes(e) for e in range(2)] |*> zip |> tuple
+#models = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
