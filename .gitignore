@@ -20,5 +20,6 @@ gaceir/*.py[cod]
 gaceir/*$py.class
 
 runs
+models
 *.log
 *.out
