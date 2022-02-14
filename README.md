@@ -5,6 +5,17 @@ Reinforcement Learning Agents for solving
 Currently only AC Methods are implemented. I'm focusing on Continuous Control
 Agents. 
 
+## Usage
+
+Cleanup:
+
+```
+$ make clean wipe kill
+```
+
+Will clean model directory, wipe run directory and kill all spectre/ace
+instances.
+
 # Notes on Algorithms
 
 My personal notes on implementing the algorithms.
