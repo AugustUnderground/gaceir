@@ -15,8 +15,8 @@ import hace as ac
 verbose: bool        = True            # Print verbose debug output
 #num_envs: int        = os.sched_getaffinity(0) |> len |> (//)$(?,2)
 num_envs: int        = 50              # Number of parallel env pool
-num_episodes: int    = 42              # Number of episodes to play
-num_steps: int       = 100               # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
+num_episodes: int    = 100             # Number of episodes to play
+num_steps: int       = 100             # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
 early_stop: float    = -50.0           # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -215,6 +215,14 @@ def postprocess(observations, infos) = states where:
                |> list |> pt.vstack |> .to(device) |> .detach()
     #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
 
+def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
+                   , value: pt.nn.Module, checkpoint_file: str
+                   ) = res where:
+    state_dicts = [actor, critic, value] |> fmap$(.state_dict())
+    save_dict   = state_dicts |> (,)$(["actor", "critic", "value"],?) \
+                |*> zip |> dict
+    res = pt.save(save_dict, checkpoint_file)
+
 def train(_, _, True, _, _) = (value_target, critic_online, actor_online)
 addpattern def train( episode, iteration, finish, buffer, states
                     ) = train( episode, iteration_, finish_, buffer_, states_
@@ -232,16 +240,15 @@ addpattern def train( episode, iteration, finish, buffer, states
                 |*> ReplayBuffer |> buffer.push
     t1 = time.time()
     _           = envs$[0] |> write_performance$(?, iteration)
-    #_           = (if buffer_.size() > batch_size
-    #                  then soft_q_update(iteration, buffer_, batch_size)
-    #                  else None)
     _           = soft_q_update(iteration, buffer_, batch_size)
     done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
     finish_     = done_ or stop_ or (iteration >= num_steps)
     iteration_  = iteration + 1
     if verbose:
-        print(f"Iteration {iteration_:03} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")
+        print(f"Iteration {iteration:03} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")
+    _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
+    _           = save_checkpoint(actor_online, critic_online, value_target, model_path)
 
 def run_episode(episode: int) = (v,c,a) where:
     states  = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)

@@ -1,12 +1,9 @@
-# gACÂ²Eir
+# GAC²EIR
 
 Reinforcement Learning Agents for solving
 [GAC²E](https://github.com/augustunderground/gace).
 Currently only AC Methods are implemented. I'm focusing on Continuous Control
 Agents. 
-
-**Note**: The equations are rendered in vim using
-[nabla.nvim](https://github.com/jbyuki/nabla.nvim).
 
 # Notes on Algorithms
 
@@ -35,19 +32,20 @@ My personal notes on implementing the algorithms.
 Conservative Policy Iteration (CPI):
 
 $$ L^{CPI} (\theta) = E_{t} ( \frac{\pi_{\theta} (a_{t} | s_{t})}{\pi_{\theta,old} (a_{t} | s_{t})} \cdot A_{t} ) = E_{t} (r_{t}(\theta) \cdot A_{t}) $$
+
 Where
 - A: Advantage
 - E: Expectation
-- Ï: Actor Network returning Probability of an action a for a given state s at
+- π Actor Network returning Probability of an action a for a given state s at
   a given time t
-- Î¸: Current network parameters
+- θ: Current network parameters
 
 $$ L^{CLIP} = E_{t} ( min(r_{t}(\theta) \cdot A_{t}, clip(r_{t}(\theta), 1 - \epsilon, 1 + \epsilon) \cdot A_{t} ) ) $$
 
 Where
-- Îµ â 0.2
+- ε ≈ 0.2
 
-**â Pessimistic lower bound of loss**
+**Pessimistic lower bound of loss**
 
 ##### Advantage
 
@@ -59,8 +57,8 @@ with
 $$ \delta_{t} = r_{t} + \gamma \cdot V(s_{t + 1}) - V(s_{t}) $$
 
 Where
-- V(sâ): Critic output, aka Estimated Value (stored in memory)
-- Î» â 0.95
+- V(s_t): Critic output, aka Estimated Value (stored in memory)
+- γ ≈ 0.95
 
 #### Critic
 
@@ -74,10 +72,10 @@ $$ L^{VF} = MSE(return - value) $$
 
 $$ L^{CLIP + VF + S}_{t} (\theta) = E_{t} [ L^{CLIP}_{t} (\theta) - c_{1} \cdot L^{VF}_{t} (\theta) + c_{2} \cdot S[\pi_{\theta}](s_{t}) ] $$
 
-â Gradient Ascent, **not** Descent!
+Gradient Ascent, **not** Descent!
 
 - S: only used for shared AC Network
-- câ â 0.5
+- c1 = 0.5
 
 ## Twin Delayed Double Dueling Policy Gradient (TD3)
 
@@ -91,14 +89,14 @@ $$ L^{CLIP + VF + S}_{t} (\theta) = E_{t} [ L^{CLIP}_{t} (\theta) - c_{1} \cdot 
 
 ### Loss
 
-E%¡U
+$$ \nabla_{\phi} J_(\phi) = \frac{1}{N} \sum \nabla_{a} Q_{\theta 1} (s,a) |_{a = \pi_{\phi} (s)} \cdot \nabla_{\phi} \pi_{\phi} (s) $$
 
 Where
-- Ï: Policy Network with parameters Ï
+- π: Policy Network with parameters φ
 - Gradient of first critic w.r.t. actions chosen by critic
 - Gradient of policy network w.r.t. it's own parameters
 
-â Chain rule applied to loss function
+Chain rule applied to loss function
 
 ### Network Updates
 
@@ -108,12 +106,12 @@ $$ \theta \leftarrow \tau \cdot \theta_{i} + (1 - \tau) \cdot \theta_{i}' $$
 $$ \phi \leftarrow \tau \cdot \phi{i} + (1 - \tau) \cdot \phi{i}' $$
 
 Where 
-- Ï â 0.005
+- τ ≈ 0.005
 
 _Soft_ update with heavy weight on current target parameters vs. heavily
 discounted parameters of online network.
 
-â Not every step, only after actor update.
+Not every step, only after actor update.
 
 #### Actor
 
@@ -131,13 +129,15 @@ discounted parameters of online network.
 - Add noise and clip
 
 $$ a^{~} \leftarrow \pi_{\phi'} (s') + \epsilon $$
+
 with
 
 $$ \epsilon ~ clip(N(0, \sigma), -c, c) $$
+
 Where
-- Ï â 0.2, noise standard deviation
-- c â 0.5, noise clipping
-- Î³ â 0.99, discount factor
+- σ ≈ 0.2, noise standard deviation
+- c ≈ 0.5, noise clipping
+- γ ≈ 0.99, discount factor
 
 $$ y \leftarrow r + \gamma \cdot min( Q'_{\theta1}(s', a^{~}), Q'_{\theta1}(s', a^{~})) $$
 
@@ -153,12 +153,12 @@ and is modeled by reward scaling.
 $$ log( \pi (a|s) ) = log (\mu (a|s)) - \sum^{D}_{i=1} log ( 1 - tanh^{2} (a_{i}) ) $$
 
 Where
-- Î¼: Sample of a distribution (**NOT MEAN**)
-- Ï: Probability of selecting this particular action a given state s
+- μ: Sample of a distribution (**NOT MEAN**)
+- π: Probability of selecting this particular action a given state s
 
 ### Hyper Parameters
 
-- Target smoothing coefficient Ï
+- Target smoothing coefficient
 - target update interval
 - replay buffer size
 - gradient steps
@@ -168,8 +168,8 @@ Where
 $$ J = N^{-1} \cdot \sum log(\pi (a_{t} | s_{t})) - Q_{min}(s_{t}, a_{t}) $$
 
 Where
-- sâ is sampled from replay buffer / memory
-- aâ is generated with actor network given sampled states
+- s_t is sampled from replay buffer / memory
+- a_t is generated with actor network given sampled states
 - Qmin is minimum of 2 critics
 
 ### Value Update
@@ -177,9 +177,9 @@ Where
 $$ J = N^{-1} \cdot \sum \frac{1}{2} \cdot ( V(s_{t}) - Qmin (s_{t}, a_{t}) - log(\pi (a_{t} | s_{t})) ) $$
 
 Where
-- V(sâ): sampled values from memory
-- sâ: sampled states from memory
-- aâ: newly computed actions
+- V(s_t): sampled values from memory
+- s_t: sampled states from memory
+- a_t: newly computed actions
 
 ### Critic
 
@@ -198,17 +198,18 @@ Where
 $$ \psi \leftarrow \tau \cdot \psi + (1 - \tau) \cdot \psi' $$
 
 Where
-- Ï â 0.005
+- τ ≈ 0.005
 
 ## Things TODO
 
-- [ ] Implement replay buffer / memory as algebraic data type
+- [X] Implement replay buffer / memory as algebraic data type
 - [X] Implement PPO (Probabilistic)
 - [X] Implement TD3 (Deterministic)
-- [ ] Implement SAC (Probabilistic)
-- [ ] Implement More?
+- [X] Implement SAC (Probabilistic)
 - [ ] Include step count in reward
 - [ ] Try Discrete action spaces
 - [ ] Normalize and/or reduce observation space
 - [ ] consider previous reward
-- [ ] return trained models instead of loss
+- [X] return trained models instead of loss
+- [ ] handling of `done` for parallel envs
+- [ ] higher reward for finishsing earlier
