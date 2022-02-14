@@ -69,16 +69,16 @@ def write_performance(env: gym.Env, step: int) = performance where:
                           , step )
 
 ## Replay Buffer
-ReplayBuffer         = namedtuple("ReplayBuffer", "state action reward next_state done")
-
-def push(b: ReplayBuffer, t: tuple) = b_ where:
-    b_ = (if len(b.state) <= 0 
-             then t |*> ReplayBuffer |> fmap$(.[-buffer_size:])
-             else zip(b,t) |> fmap$(.[-buffer_size:] .. pt.vstack) |*> ReplayBuffer)
-
-def sample(b: ReplayBuffer, bs: int) = s where:
-    i = b.state |> .shape |> .[0] |> pt.randperm |> .[:bs] |> .tolist()
-    s = (e[i,:] for e in b) |*> ReplayBuffer
+data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
+                 , next_state: pt.Tensor, done: pt.Tensor ):
+    def push(self, other) = new where:
+        new = (if len(self.state) <= 0 
+                  then other |*> ReplayBuffer |> fmap$(.[-buffer_size:])
+                  else zip(self,other) |> fmap$(.[-buffer_size:] .. pt.vstack) |*> ReplayBuffer)
+    def sample(self, batch_size: int) = smpl where:
+        idx = self.state |> .shape |> .[0] |> pt.randperm |> .[:batch_size] |> .tolist()
+        smpl = (e[idx,:] for e in self) |*> ReplayBuffer
+    def size(self) = self.state |> .shape |> .[0] |> float
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -192,6 +192,13 @@ def update(epoch, buffer) = (q1_loss, q2_loss, π_loss) where:
     #    print(f"                      | Q2 Loss: {q2_loss.item():.3f}")
 
 ## Exploration
+def subset(obs, inf, pre) = sub where:
+    sub = [ [ i["output-parameters"].index(p)
+              for p in i["output-parameters"] if p.startswith(pre)
+            ] for i in inf 
+          ] |> zip$(?,obs) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
+            |> list |> pt.vstack |> .to(device) |> .detach()
+
 def postprocess(observations, infos) = states where:
     #performances = subset(observations, infos, "performance") \
     #             / subset(observations, infos, "target")
@@ -217,7 +224,8 @@ def explore( envs, step, states, buffer
     next_states = postprocess(observations, infos)
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    new_buffer  = push(buffer, (states, actions, rewards, next_states, dones))
+    new_buffer  = (states, actions, rewards, next_states, dones) \
+                |*> ReplayBuffer |> buffer.push
     t1          = time.time()
     _           = writer.add_scalar("Total_Reward", rewards.sum().item(), step)
     _           = writer.add_scalar("Average_Reward", rewards.mean().item(), step)
@@ -230,7 +238,7 @@ addpattern def run_episode( iteration, states, buffer, done
                           ) = run_episode( iteration + 1, next_states
                                          , new_buffer, finish
                                          ) where:
-    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.eval())
+    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.cuda() .. .eval())
     expl   = (sb, e) -> sb |*> explore$(envs, e, ?)
     steps  = range(iteration, iteration + num_steps)
     next_states, new_buffer \
@@ -238,7 +246,7 @@ addpattern def run_episode( iteration, states, buffer, done
     done_  = .item() .. pt.all .. .bool() .. .squeeze() .. .done <| new_buffer
     stop_  = new_buffer.reward[-num_envs:].mean().item() < early_stop
     finish = done_ or stop_ or (iteration >= 200)
-    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.train())
+    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.cuda() .. .train())
     q1_loss, q2_loss, π_loss_ \
            = [ update(epoch, new_buffer) for epoch in num_epochs |> range 
              ]  |*> zip |> fmap$pt.hstack |> tuple
@@ -246,7 +254,9 @@ addpattern def run_episode( iteration, states, buffer, done
     _      = envs$[0] |> write_performance$(?, iteration)
 
 def run_episodes(episode: int) = (φ,θ1,θ2) where:
-    states = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
-    buffer = pt.empty(0) |> repeat |> .$[:5] |> list |*> ReplayBuffer
-    memory = run_episode(0, states, buffer, False)
+    _       = [φ, θ1, θ2] |> fmap$(.cuda())
+    states  = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
+    buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    memory  = run_episode(0, states, buffer, False)
+    a,c1,c2 = [φ, θ1, θ2] |> fmap$(.cpu() .. .eval())
 

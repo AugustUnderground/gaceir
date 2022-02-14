@@ -1,20 +1,19 @@
 import coconut.convenience
-import algorithm.ppo as ppo
+#import algorithm.ppo as ppo
 #import algorithm.td3 as td3
+import algorithm.sac as sac
 import os, time, datetime
 import torch as pt
 import hace as ac
 import gym, gace
 
 ## PPO
-actor, critic = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-a, c = [ppo.run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
-
-#states = ppo.envs.reset() |> fmap$pt.from_numpy |> pt.vstack |> .to(device)
-#losses,rewards = ppo.run_episode(states, False, pt.empty(0), pt.empty(0))
+#actor, critic = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
+a,c = [ppo.run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
 
 ## TD3
 #models = [td3.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#models = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
+a,c1,c2 = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
 
-
+## SAC
+v,c,a = [sac.run_episode(e) for e in range(sac.num_episodes)] |*> zip |> tuple
