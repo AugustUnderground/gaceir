@@ -3,6 +3,10 @@
 Clean and Self Contained implementations of Reinforcement Learning Agents for
 solving [GAC²E](https://github.com/augustunderground/gace).
 
+- [X] PPO (Probabilistic)
+- [X] TD3 (Deterministic)
+- [X] SAC (Probabilistic)
+
 ## Usage
 
 Cleanup:
@@ -215,7 +219,7 @@ Where
 - [X] Implement PPO (Probabilistic)
 - [X] Implement TD3 (Deterministic)
 - [X] Implement SAC (Probabilistic)
-- [ ] Include step count in reward
+- [X] Include step count in reward
 - [ ] Try Discrete action spaces
 - [ ] Normalize and/or reduce observation space
 - [ ] consider previous reward
