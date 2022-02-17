@@ -1,7 +1,4 @@
 import coconut.convenience
-import algorithm.ppo as ppo
-#import algorithm.td3 as td3
-#import algorithm.sac as sac
 import os, time, datetime
 import torch as pt
 import hace as ac
@@ -9,6 +6,10 @@ import gym, gace
 from hy.core import *
 from hy.core.language import *
 from hy.contrib.pprint import pp
+
+import algorithm.ppo as ppo
+import algorithm.td3 as td3
+import algorithm.sac as sac
 
 ## Environment setup
 ace_id: str      = "op2"
