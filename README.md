@@ -15,7 +15,7 @@ Cleanup:
 $ make clean wipe kill
 ```
 
-Will clean model directory, wipe run directory and kill all spectre/ace
+Will clean model directory, wipe run directory and kill all spectre
 instances.
 
 # Notes on Algorithms
