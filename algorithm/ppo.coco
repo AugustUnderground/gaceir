@@ -9,9 +9,6 @@ from torch.utils.tensorboard import SummaryWriter
 from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
-from hy.core import *
-from hy.core.language import *
-from hy.contrib.pprint import pp
 
 ## Defaults (as args later)
 verbose: bool     = True            # Print verbose debug output
