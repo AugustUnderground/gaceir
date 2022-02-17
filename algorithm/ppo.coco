@@ -127,6 +127,7 @@ def update_policy( model: Model, states: pt.Tensor, actions: pt.Tensor
     _           = losses |> pt.mean |> .backward()
     _           = model.optim       |> .step()
 
+## Exploration
 def postprocess(observations, keys) = states where:
     idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
             for key in keys ] 
@@ -147,6 +148,7 @@ def trajectories( model: Model, envs: gace.envs.vec.VecACE
     rewards     = rewards_ |> pt.Tensor |> .to(device)
     memories    = Memory(states,actions,logprobs,rewards,values,masks)
 
+## Generalized Advantage Estimate
 def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
        , γ: float = 0.99, τ: float = 0.95 ) = a where:
     δ = r + γ * v_ * m - v
@@ -156,12 +158,14 @@ def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
               , l, i ) |> .[:-1]
     a = v + g
 
+## Checkpoint Saving
 def save_checkpoint( model: Model, checkpoint_file: str) = res where:
     state_dicts = [model.actor, model.critic, model.optim] |> fmap$(.state_dict())
     state_keys  = ["actor", "critic", "optim"]
     save_dict   = (state_keys, state_dicts) |*> zip |> dict 
     res         = pt.save(save_dict, checkpoint_file)
 
+## Training
 def traject(model, envs, (memories,states), step) = (memories_, states_) where:
     t0             = time.time()
     memory,states_ = trajectories(model, envs, states)
@@ -178,10 +182,10 @@ def train(model, epoch, loader) = loss |> pt.mean where:
     t1   = time.time()
     writer.add_scalar("_Loss_Mean", loss.mean().item(), epoch)
 
-def run_episode(_, _, _, _, _, True, loss, reward) = model where:
+def run_episode(_, _, episode, _, _, True, loss, reward) = model where:
     total   = reward |> .sum() |> .item()
     _       = writer.add_scalar(f"_Reward_Total", total, episode)
-    _       = writer.add_scalar("_Loss_Sum", loss.sum().item(), epoch)
+    _       = writer.add_scalar("_Loss_Sum", loss.sum().item(), episode)
     if verbose:
         f"Episode {episode:03} Finished | Total Reward: {total}" |> print
 addpattern def run_episode(envs, model, episode, iteration, states, _, loss, reward
@@ -205,10 +209,10 @@ addpattern def run_episode(envs, model, episode, iteration, states, _, loss, rew
     loss_      = pt.cat((loss, losses))
     reward_    = pt.cat((reward, memories_.rewards))
     iteration_ = iteration + 1
+    _          = save_checkpoint(model, model_path)
     if verbose:
         r = memories_.rewards.mean().item()
-        print(f"Epsiode {episode:03}, Iteration {iteration:03} | Average Reward {r:.3f}")
-    _          = save_checkpoint(model, model_path)
+        print(f"Iteration {iteration:03} | Average Reward {r:.3f}")
 
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                 ) = model where:
