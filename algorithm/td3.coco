@@ -10,13 +10,15 @@ from torch.utils.tensorboard import SummaryWriter
 from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
+from hy.core import *
+from hy.core.language import *
+from hy.contrib.pprint import pp
 
 ## Defaults (as args later)
 verbose: bool        = True            # Print verbose debug output
-#num_envs: int        = os.sched_getaffinity(0) |> len |> (//)$(?,2)
-num_envs: int        = 50              # Number of parallel env pool
 num_episodes: int    = 42              # Number of episodes to play
-num_steps: int       = 2               # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
+num_steps: int       = 2               # How many steps to take
+num_iters: int       = 100             # Iterations per Epoch
 num_epochs: int      = 100             # How many time steps to update policy
 early_stop: float    = -50.0           # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
@@ -51,13 +53,6 @@ os.makedirs(model_dir, exist_ok = True)
 device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
 writer = SummaryWriter(log_dir = log_dir, flush_secs = 30)
 _      = rng_seed |> pt.manual_seed
-
-## Environment setup
-envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-#obs_dim: int = envs.observation_space[0].shape[0]
-obs_dim: int = envs$[0].target |> len |> (*)$(3)
-#obs_dim: int = envs$[0].target |> len |> (*)$(2)
-act_dim: int = envs.action_space[0].shape[0]
 
 ## Utility
 def write_performance(env: gym.Env, step: int) = performance where:
@@ -104,32 +99,42 @@ def actor_net(obs_dim: int, act_dim: int) = act_net where:
                               , pt.nn.Linear(128    , 64)     , pt.nn.ReLU()
                               , pt.nn.Linear(64     , act_dim), pt.nn.Tanh())
 
-def soft_update(source, target, τ = 1e-2) = target where:
+def soft_update( source: pt.nn.Module, target: pt.nn.Module, τ: float = 1e-2
+               ) = target where:
     for param, target_param in zip(source.parameters(), target.parameters()):
         target_param.data.copy_(τ * param.data + (1 - τ) * target_param.data)
 
-## Current Networks
-Q1 = critic_net(obs_dim, act_dim) |> .to(device)
-Q2 = critic_net(obs_dim, act_dim) |> .to(device)
-π  = actor_net(obs_dim, act_dim)  |> .to(device)
+data Model( Q1: pt.nn.Module, Q2: pt.nn.Module, π: pt.nn.Module
+          , θ1: pt.nn.Module, θ2: pt.nn.Module, φ: pt.nn.Module 
+          , Q1_optim: pt.optim.Optimizer, Q2_optim: pt.optim.Optimizer
+          , π_optim: pt.optim.Optimizer, Q_loss ):
+    def select_action(self, state: pt.Tensor, step: int) = action where:
+        with pt.no_grad():
+            action = state |> self.π |> add_noise$(?,t = step) |> .detach()
+        if verbose:
+            print(f"Selecting Agent Action.")
+    def eval_mode(self) = self where:
+        [ self.π, self.Q1, self.Q2, self.φ, self.θ1, self.θ2
+        ] |> fmap$(.to(device) .. .eval())
+    def train_mode(self) = self where:
+        [ self.π, self.Q1, self.Q2, self.φ, self.θ1, self.θ2
+        ] |> fmap$(.to(device) .. .train())
 
-## Target Networks
-θ1 = critic_net(obs_dim, act_dim) |> .to(device)
-θ2 = critic_net(obs_dim, act_dim) |> .to(device)
-φ  = actor_net(obs_dim, act_dim)  |> .to(device)
-
-## Initial Syncronization
-_ = soft_update(Q1, θ1, τ = 1.0)
-_ = soft_update(Q2, θ2, τ = 1.0)
-_ = soft_update(π, φ, τ = 1.0)
-
-## Optimizers
-q1_optim = pt.optim.Adam(Q1.parameters(), lr = α, betas = βs)
-q2_optim = pt.optim.Adam(Q2.parameters(), lr = α, betas = βs)
-π_optim  = pt.optim.Adam(π.parameters(), lr = α, betas = βs)
-
-## Loss
-q_loss = pt.nn.MSELoss()
+def make_model(act_dim: int, obs_dim: int) = model where:
+    Q1       = critic_net(obs_dim, act_dim) |> .to(device)
+    Q2       = critic_net(obs_dim, act_dim) |> .to(device)
+    π        = actor_net(obs_dim, act_dim)  |> .to(device)
+    θ1       = critic_net(obs_dim, act_dim) |> .to(device)
+    θ2       = critic_net(obs_dim, act_dim) |> .to(device)
+    φ        = actor_net(obs_dim, act_dim)  |> .to(device)
+    _        = soft_update(Q1, θ1, τ = 1.0)
+    _        = soft_update(Q2, θ2, τ = 1.0)
+    _        = soft_update(π , φ , τ = 1.0)
+    Q1_optim = pt.optim.Adam(Q1.parameters(), lr = α, betas = βs)
+    Q2_optim = pt.optim.Adam(Q2.parameters(), lr = α, betas = βs)
+    π_optim  = pt.optim.Adam(π.parameters() , lr = α, betas = βs)
+    Q_loss   = pt.nn.MSELoss()
+    model    = Model(Q1, Q2, π, θ1, θ2, φ, Q1_optim, Q2_optim, π_optim, Q_loss)
 
 ## Exploitation
 def add_noise( a, t = 0, lo = -1.0, hi = 1.0, σ_max = 1.0, σ_min = 1.0, d = 1000000
@@ -143,120 +148,113 @@ def random_action(envs) = action where:
     if verbose:
         print(f"WARMUP: Selecting Random Action.")
 
-def select_action(net, state, step) = action where:
-    with pt.no_grad():
-        action = state |> net |> add_noise$(?,t = step) |> .detach()
-    if verbose:
-        print(f"Selecting Action From Model.")
-
-def policy_update(epoch, states) = π_loss where:
-    π_loss = states |> π |> (,)$(states,?) |> Q1 |> .mean() |> (-)
-    _      = π_optim.zero_grad()
+def policy_update(epoch, model, states) = π_loss where:
+    π_loss = states |> model.π |> (,)$(states,?) |> model.Q1 |> .mean() |> (-)
+    _      = model.π_optim.zero_grad()
     _      = π_loss.backward()
-    _      = π_optim.step()
-    _      = soft_update(Q1, θ1, τ = τ_soft)
-    _      = soft_update(Q2, θ2, τ = τ_soft)
-    _      = soft_update(π , φ , τ = τ_soft)
-    _      = writer.add_scalar("π_loss" , π_loss , epoch)
-    #if verbose:
-    #    print(f"Actor Update  {epoch:03}/{num_epochs} | π Loss: {π_loss.item():.3f}")
+    _      = model.π_optim.step()
+    _      = soft_update(model.Q1, model.θ1, τ = τ_soft)
+    _      = soft_update(model.Q2, model.θ2, τ = τ_soft)
+    _      = soft_update(model.π , model.φ , τ = τ_soft)
+    _      = writer.add_scalar("_Loss_π" , π_loss , epoch)
 
-def update(epoch, buffer) = (q1_loss, q2_loss, π_loss) where:
+def update(epoch, model, buffer) = (q1_loss, q2_loss, π_loss) where:
     states, actions, rewards, next_states, dones \
-                 = sample(buffer, batch_size) |> fmap$(.to(device))
-    noise        = actions.shape |> pt.zeros |> pt.normal$(?,pol_noise) \
-                                 |> pt.clamp$(?,-clp_noise, clp_noise)  \
-                                 |> .to(device)
-    next_actions = states |> φ |> (+)$(?,noise) |> pt.clamp$(?, -1.0, 1.0)
-    q1_target    = (next_states, next_actions) |> θ1
-    q2_target    = (next_states, next_actions) |> θ2
+                 = buffer.sample(batch_size) |> fmap$(.to(device))
+    noise        = actions |> pt.zeros_like |> pt.normal$(?,pol_noise) \
+                           |> pt.clamp$(?,-clp_noise, clp_noise) |> .to(device)
+    next_actions = states |> model.φ |> (+)$(?,noise) |> pt.clamp$(?, -1.0, 1.0)
+    q1_target    = (next_states, next_actions) |> model.θ1
+    q2_target    = (next_states, next_actions) |> model.θ2
     q_target     = pt.min(q1_target, q2_target)
     q_expected   = (rewards + (1.0 - dones) * γ * q_target) |> .detach()
-    q1           = (states, actions) |> Q1
-    q2           = (states, actions) |> Q2
-    q1_loss      = q_loss(q1, q_expected)
-    q2_loss      = q_loss(q2, q_expected)
-    _            = q1_optim.zero_grad()
+    q1           = (states, actions) |> model.Q1
+    q2           = (states, actions) |> model.Q2
+    q1_loss      = model.Q_loss(q1, q_expected)
+    q2_loss      = model.Q_loss(q2, q_expected)
+    _            = model.Q1_optim.zero_grad()
     _            = q1_loss.backward()
-    _            = q1_optim.step()
-    _            = q2_optim.zero_grad()
+    _            = model.Q1_optim.step()
+    _            = model.Q2_optim.zero_grad()
     _            = q2_loss.backward()
-    _            = q2_optim.step()
-    π_loss       = (if epoch in count(0, update_interval) 
-                       then policy_update(epoch, states)
+    _            = model.Q2_optim.step()
+    π_loss       = (if epoch % 2 == 0 # epoch in count(0, update_interval) 
+                       then policy_update(epoch, model, states)
                        else pt.nan |> pt.tensor |> .to(device))
-    _            = writer.add_scalar("q1_loss", q1_loss, epoch)
-    _            = writer.add_scalar("q2_loss", q2_loss, epoch)
+    _            = writer.add_scalar("_Loss_Q1", q1_loss, epoch)
+    _            = writer.add_scalar("_Loss_Q2", q2_loss, epoch)
     #if verbose:
-    #    print(f"Critic Update {epoch:03}/{num_epochs} | Q1 Loss: {q1_loss.item():.3f}")
-    #    print(f"                      | Q2 Loss: {q2_loss.item():.3f}")
+    #    print(f"Epoch {epoch:03} | Q Loss: {q1_loss:3f}, {q2_loss:3f}")
 
 ## Exploration
-def subset(obs, inf, pre) = sub where:
-    sub = [ [ i["output-parameters"].index(p)
-              for p in i["output-parameters"] if p.startswith(pre)
-            ] for i in inf 
-          ] |> zip$(?,obs) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-            |> list |> pt.vstack |> .to(device) |> .detach()
+def postprocess(observations, keys) = states where:
+    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+            for key in keys ] 
+    states = [ o[i] for o,i in zip(observations, idx)
+             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
 
-def postprocess(observations, infos) = states where:
-    #performances = subset(observations, infos, "performance") \
-    #             / subset(observations, infos, "target")
-    #distances    = subset(observations, infos, "distance")
-    #states       = (performances, distances) |> pt.hstack
-    states = [ [ i["output-parameters"].index(p) for p in i["output-parameters"] 
-                 if ["performance", "target", "distance"] |> fmap$(p.startswith, ?) |> any 
-               ] for i in infos 
-             ] |> zip$(?,observations) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-               |> list |> pt.vstack |> .to(device) |> .detach()
-    #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
-
-def explore( envs, step, states, buffer
+def explore( envs, model, step, states, buffer
            ) = (next_states, new_buffer) where:
-    actions     = (if (step * num_envs) < warmup_periode
+    actions     = (if (step * len(envs)) < warmup_periode
                       then random_action(envs)
-                      else select_action(π, states, step))
+                      else model.select_action(states, step))
     t0          = time.time()
     observations,rewards_,dones_,infos \
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    next_states = postprocess(observations, infos)
+    next_states = postprocess(observations, [i["output-parameters"] for i in infos])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     new_buffer  = (states, actions, rewards, next_states, dones) \
                 |*> ReplayBuffer |> buffer.push
     t1          = time.time()
-    _           = writer.add_scalar("Total_Reward", rewards.sum().item(), step)
-    _           = writer.add_scalar("Average_Reward", rewards.mean().item(), step)
+    _           = writer.add_scalar("_Reward_Mean", rewards.mean().item(), step)
     if verbose:
         print(f"Step {step:03} took {(t1 - t0):.3f}s  | Average Reward: {rewards.mean():.3f}")
 
+## Checkpoint Saving
+def save_checkpoint(model: Model, checkpoint_file: str) = res where:
+    state_dicts = [ model.Q1, model.Q2, model.π, model.θ1, model.θ2, model.φ
+                  , model.Q1_optim, model.Q2_optim ] |> fmap$(.state_dict())
+    keys        = [ "Q1", "Q2", "pi", "T1", "T2", "phi"
+                  , "Q1_opt", "Q2_opt", "pi_opt" ]
+    save_dict   = (keys, state_dicts) |*> zip |> dict
+    res         = pt.save(save_dict, checkpoint_file)
+
 ## Run Episode until done
-def run_episode(_, _, buffer, True) = buffer
-addpattern def run_episode( iteration, states, buffer, done
-                          ) = run_episode( iteration + 1, next_states
-                                         , new_buffer, finish
+def run_episode(_, model, episode, _, _, buffer, True) = model where:
+    total   = buffer.reward |> .sum() |> .item()
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    if verbose:
+        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
+addpattern def run_episode( envs, model, episode, iteration, states, buffer, done
+                          ) = run_episode( envs, model, episode, iteration + 1
+                                         , next_states, new_buffer, finish 
                                          ) where:
-    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.cuda() .. .eval())
-    expl   = (sb, e) -> sb |*> explore$(envs, e, ?)
+    _      = model.eval_mode()
+    expl   = (sb, e) -> sb |*> explore$(envs, model, e, ?)
     steps  = range(iteration, iteration + num_steps)
     next_states, new_buffer \
-           = reduce(expl, steps , (states, buffer))
+           = reduce(expl, steps, (states, buffer))
     done_  = .item() .. pt.all .. .bool() .. .squeeze() .. .done <| new_buffer
-    stop_  = new_buffer.reward[-num_envs:].mean().item() < early_stop
-    finish = done_ or stop_ or (iteration >= 200)
-    _      = [π, Q1, Q2, φ, θ1, θ2] |> fmap$(.cuda() .. .train())
+    last   = len(envs) + num_steps
+    stop_  = new_buffer.reward[-last:].mean().item() < early_stop
+    finish = done_ or stop_ or (iteration >= num_iters)
+    _      = model.train_mode()
     q1_loss, q2_loss, π_loss_ \
-           = [ update(epoch, new_buffer) for epoch in num_epochs |> range 
+           = [ update(epoch, model, new_buffer) 
+               for epoch in num_epochs |> range 
              ]  |*> zip |> fmap$pt.hstack |> tuple
     π_loss = π_loss_[~π_loss_.isnan()]
     _      = envs$[0] |> write_performance$(?, iteration)
 
-def run_episodes(episode: int) = (φ,θ1,θ2) where:
-    _       = [φ, θ1, θ2] |> fmap$(.cuda())
-    states  = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
+def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
+                ) = model where:
+    obs     = envs.reset()
+    states  = postprocess(obs, envs.observation_keys)
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
-    memory  = run_episode(0, states, buffer, False)
-    a,c1,c2 = [φ, θ1, θ2] |> fmap$(.cpu() .. .eval())
+    memory  = run_episode(envs, model, episode, 0, states, buffer, False)
+    _       = model.eval_mode()
+    _       = save_checkpoint(model, model_path)
 

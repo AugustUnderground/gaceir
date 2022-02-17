@@ -10,13 +10,14 @@ from torch.utils.tensorboard import SummaryWriter
 from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
+from hy.core import *
+from hy.core.language import *
+from hy.contrib.pprint import pp
 
 ## Defaults (as args later)
 verbose: bool        = True            # Print verbose debug output
-#num_envs: int        = os.sched_getaffinity(0) |> len |> (//)$(?,2)
-num_envs: int        = 50              # Number of parallel env pool
 num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 100             # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
+num_steps: int       = 100             # How many steps to take
 early_stop: float    = -50.0           # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -47,13 +48,6 @@ device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
 writer = SummaryWriter(log_dir = log_dir, flush_secs = 30)
 _      = rng_seed |> pt.manual_seed
 
-## Environment setup
-envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-#obs_dim: int = envs.observation_space[0].shape[0]
-obs_dim: int = envs$[0].target |> len |> (*)$(3)
-#obs_dim: int = envs$[0].target |> len |> (*)$(2)
-act_dim: int = envs.action_space[0].shape[0]
-
 ## Utility
 def write_performance(env: gym.Env, step: int) = performance where:
     target      = env.target
@@ -81,12 +75,6 @@ data HStack() from pt.nn.Module:
 
 data VStack() from pt.nn.Module:
     def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.vstack
-
-## Weight initializer for final Layers
-def init_weights(m: pt.nn.Module, init: float):
-    if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
-        m.weight.data.uniform_(-init, init)
-        m.bias.data.uniform_(-init, init)
 
 ## Value Network
 data ValueNet(obs_dim: int) from pt.nn.Module:
@@ -130,132 +118,128 @@ data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float =
         μ = x |> self.lin_μ
         σ = x |> self.lin_σ |> pt.clamp$(?, self.min_σ, self.max_σ)
 
-def evaluate( actor: ActorNet, state: pt.Tensor, ε: float = 1e-6
-            ) = (a, p, z, μ, σ) where:
-    μ,σ_ = state |> actor
-    σ    = σ_ |> pt.exp
-    n    = pt.distributions.Normal(μ, σ)
-    z    = n.sample()
-    a    = z |> pt.tanh
-    ε_   = pt.log(1 - a.pow(2) + ε)
-    p    = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
+data Model( actor_online: pt.nn.Module, critic_online: pt.nn.Module
+          , value_online: pt.nn.Module, value_target: pt.nn.Module
+          , actor_optim: pt.optim.Optimizer, critic_optim: pt.optim.Optimizer
+          , value_optim: pt.optim.Optimizer, critic_loss, value_loss  ):
+    def sync_target(self, other = None) = self.value_target where:
+        source = other if other else self.value_online
+        target = self.value_target
+        update = (t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_
+        _ = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
+                                       ) |*> zip |> starmap$(update, ?) |> list
+    def act(self, state: pt.Tensor) = a where:
+        μ,σ_ = state |> self.actor_online
+        σ    = σ_ |> pt.exp
+        a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
+    def evaluate( self, state: pt.Tensor, ε: float = 1e-6
+                ) = (a, p, z, μ, σ) where:
+        μ,σ_ = state |> self.actor_online
+        σ    = σ_ |> pt.exp
+        n    = pt.distributions.Normal(μ, σ)
+        z    = n.sample()
+        a    = z |> pt.tanh
+        ε_   = pt.log(1 - a.pow(2) + ε)
+        p    = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
 
-def act(actor: ActorNet, state: pt.Tensor) = a where:
-    μ,σ_ = state |> actor
-    σ    = σ_ |> pt.exp
-    a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
-
-def sync_params(target, online) = target where:
-    _ = [target, online] |> fmap$(fmap$(.data) .. list .. .parameters()) |*> zip \
-      |> starmap$((t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_, ?) |> list
-
-## Loss functions
-q_criterion = pt.nn.MSELoss()
-v_criterion = pt.nn.MSELoss()
-
-## Online Networks
-value_online  = ValueNet(obs_dim) |> .to(device)
-critic_online = CriticNet(obs_dim, act_dim) |> .to(device)
-actor_online  = ActorNet(obs_dim, act_dim) |> .to(device)
-
-_ = [ init_weights$(?,3e-3) |> n.apply 
-      for n in [ value_online, critic_online, actor_online ] ]
-
-## Value Target Network
-value_target = ValueNet(obs_dim) |> .to(device)
-for tp,op in [value_target, value_online] |> fmap$(.parameters()) |*> zip:
-    op |> .data |> tp.data.copy_
-
-## Optimizers For all Networks
-v_optim = pt.optim.Adam(value_online.parameters(), lr = α, betas = βs)
-q_optim = pt.optim.Adam(critic_online.parameters(), lr = α, betas = βs)
-p_optim = pt.optim.Adam(actor_online.parameters(), lr = α, betas = βs)
+def make_model(act_dim: int, obs_dim: int) = model where:
+    def init_weights(m: pt.nn.Module, init: float):
+        if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
+            m.weight.data.uniform_(-init, init)
+            m.bias.data.uniform_(-init, init)
+    critic_loss   = pt.nn.MSELoss()
+    value_loss    = pt.nn.MSELoss()
+    actor_online  = ActorNet(obs_dim, act_dim)  |> .to(device)
+    critic_online = CriticNet(obs_dim, act_dim) |> .to(device)
+    value_online  = ValueNet(obs_dim) |> .to(device)
+    _             = [ init_weights$(?,3e-3) |> n.apply
+                      for n in [ value_online, critic_online, actor_online ] ]
+    value_target  = ValueNet(obs_dim) |> .to(device)
+    params        = [value_target, value_online] |> fmap$(.parameters()) |*> zip
+    _             = [op |> .data |> tp.data.copy_ for tp,op in params]
+    actor_optim   = pt.optim.Adam(actor_online.parameters(), lr = α, betas = βs)
+    critic_optim  = pt.optim.Adam(critic_online.parameters(), lr = α, betas = βs)
+    value_optim   = pt.optim.Adam(value_online.parameters(), lr = α, betas = βs)
+    model         = Model( actor_online, critic_online, value_online, value_target
+                         , actor_optim, critic_optim, value_optim
+                         , critic_loss, value_loss )
 
 ## Update
-def soft_q_update(epoch: int, buffer: ReplayBuffer, batch_size: int
-                 , γ:float = 0.99, μλ: float = 1e-3, σλ: float = 1e-3
-                 , zλ: float = 0.0, τ_soft: float = 1e-2 
-                 ) = (v_loss, q_loss, p_loss) where:
+def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
+                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
+                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
     states, actions, rewards, next_states, dones \
                 = buffer.sample(batch_size) |> fmap$(.to(device))
-    v_expected  = value_online(states)
-    q_expected  = critic_online(states, actions)
+    v_expected  = model.value_online(states)
+    q_expected  = model.critic_online(states, actions)
     new_actions, log_prob, z, μ, σ \
-                = evaluate(actor_online, states)
-    v_target    = value_target(next_states)
+                = model.evaluate(states)
+    v_target    = model.value_target(next_states)
     q_next      = (rewards + ( 1 - dones ) * γ * v_target) |> .detach()
-    q_loss      = q_criterion(q_expected, q_next)
-    q_exp_nxt   = critic_online(states, new_actions)
+    c_loss      = model.critic_loss(q_expected, q_next)
+    q_exp_nxt   = model.critic_online(states, new_actions)
     v_next      = (q_exp_nxt - log_prob) |> .detach()
-    v_loss      = v_criterion(v_expected, v_next)
-    lp_target   = q_exp_nxt - v_expected
-    l_loss      = (log_prob * (log_prob - lp_target)) |> .detach() |> .mean()
+    v_loss      = model.value_loss(v_expected, v_next)
+    l_target   = q_exp_nxt - v_expected
+    l_loss      = (log_prob * (log_prob - l_target)) |> .detach() |> .mean()
     μ_loss      = μ |> pt.pow$(?,2) |> pt.mean |> (*)$(μλ,?)
     σ_loss      = σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
     z_loss      = z |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
-    p_loss      = l_loss + μ_loss + σ_loss + z_loss
-    _           = q_optim.zero_grad()
-    _           = q_loss.backward()
-    _           = q_optim.step()
-    _           = v_optim.zero_grad()
+    a_loss      = l_loss + μ_loss + σ_loss + z_loss
+    _           = model.critic_optim.zero_grad()
+    _           = c_loss.backward()
+    _           = model.critic_optim.step()
+    _           = model.value_optim.zero_grad()
     _           = v_loss.backward()
-    _           = v_optim.step()
-    _           = p_optim.zero_grad()
-    _           = p_loss.backward()
-    _           = p_optim.step()
-    _           = sync_params(value_target, value_online)
+    _           = model.value_optim.step()
+    _           = model.actor_optim.zero_grad()
+    _           = a_loss.backward()
+    _           = model.actor_optim.step()
+    _           = model.sync_target()
+    _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
+    _           = writer.add_scalar("_Loss_Critic", c_loss, epoch)
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
-    _           = writer.add_scalar("_Loss_Critic", q_loss, epoch)
-    _           = writer.add_scalar("_Loss_Actor", p_loss, epoch)
 
 ## Exploration
-def subset(obs, inf, pre) = sub where:
-    sub = [ [ i["output-parameters"].index(p)
-              for p in i["output-parameters"] if p.startswith(pre)
-            ] for i in inf 
-          ] |> zip$(?,obs) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-            |> list |> pt.vstack |> .to(device) |> .detach()
-
-def postprocess(observations, infos) = states where:
-    #performances = subset(observations, infos, "performance") \
-    #             / subset(observations, infos, "target")
-    #distances    = subset(observations, infos, "distance")
-    #states       = (performances, distances) |> pt.hstack
-    states = [ [ i["output-parameters"].index(p) for p in i["output-parameters"] 
-                 if ["performance", "target", "distance"] |> fmap$(p.startswith, ?) |> any 
-               ] for i in infos 
-             ] |> zip$(?,observations) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-               |> list |> pt.vstack |> .to(device) |> .detach()
-    #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
+def postprocess(observations, keys) = states where:
+    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+            for key in keys ] 
+    states = [ o[i] for o,i in zip(observations, idx)
+             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
 
 ## Checkpoint Saving
-def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
-                   , value: pt.nn.Module, checkpoint_file: str
-                   ) = res where:
-    state_dicts = [actor, critic, value] |> fmap$(.state_dict())
-    save_dict   = state_dicts |> (,)$(["actor", "critic", "value"],?) \
-                |*> zip |> dict
-    res = pt.save(save_dict, checkpoint_file)
+def save_checkpoint(model: Model, checkpoint_file: str) = res where:
+    state_dicts = [ model.actor_online, model.critic_online, model.value_online
+                  , model.value_target, model.actor_optim, model.critic_optim
+                  , model.value_optim ] |> fmap$(.state_dict())
+    keys        = [ "actor_online", "critic_online", "value_online", "value_target"
+                  , "actor_optim", "critic_optim", "value_optim" ]
+    save_dict   = (keys, state_dicts) |*> zip |> dict
+    res         = pt.save(save_dict, checkpoint_file)
 
 ## Training Loop
-def train(_, _, True, buffer, _) = buffer
-addpattern def train( episode, iteration, finish, buffer, states
-                    ) = train( episode, iteration_, finish_, buffer_, states_
-                             ) where:
+def run_episode(_, model, episode, _, True, buffer, _) = model where:
+    total   = buffer.reward |> .sum() |> .item()
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    if verbose:
+        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
+addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states
+                          ) = run_episode( envs, model, episode, iteration_
+                                         , finish_, buffer_, states_ ) where:
     t0 = time.time()
-    actions     = act(actor_online, states)
+    actions     = model.act(states)
     observations,rewards_,dones_,infos \
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    states_     = postprocess(observations, infos)
+    states_     = postprocess(observations, [i["output-parameters"] for i in infos])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     buffer_     = (states, actions, rewards, states_, dones) \
                 |*> ReplayBuffer |> buffer.push
     t1 = time.time()
     _           = envs$[0] |> write_performance$(?, iteration)
-    _           = soft_q_update(iteration, buffer_, batch_size)
+    _           = soft_q_update(iteration, model, buffer_, batch_size)
     done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
     finish_     = done_ or stop_ or (iteration >= num_steps)
@@ -263,13 +247,12 @@ addpattern def train( episode, iteration, finish, buffer, states
     if verbose:
         print(f"Iteration {iteration:03} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")
     _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
-    _           = save_checkpoint(actor_online, critic_online, value_online, model_path)
+    _           = save_checkpoint(model, model_path)
 
 ## Episode Loop
-def run_episode(episode: int) = (value_target,critic_online,actor_online) where:
-    states  = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
+def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
+               ) = model where:
+    obs     = envs.reset()
+    states  = postprocess(obs, envs.observation_keys)
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
-    buffer_ = train(episode, 0, False, buffer, states)
-    total   = buffer_.reward |> .sum() |> .item()
-    _       = f"Episode {episode:03} Finished | Total Reward: {total}" |> print
-    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    model   = run_episode(envs, model, episode, 0, False, buffer, states)

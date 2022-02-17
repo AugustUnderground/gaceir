@@ -9,16 +9,17 @@ from torch.utils.tensorboard import SummaryWriter
 from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
+from hy.core import *
+from hy.core.language import *
+from hy.contrib.pprint import pp
 
 ## Defaults (as args later)
 verbose: bool     = True            # Print verbose debug output
-#num_envs: int     = os.sched_getaffinity(0) |> len |> (//)$(?,2)
-num_envs: int     = 50
-num_episodes: int = 69              # Number of episodes to play
+num_episodes: int = 666             # Number of episodes to play
 num_steps: int    = 5               # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
 num_epochs: int   = 50              # How many time steps to update policy
 max_iter: int     = 100             # Maximum number of iterations during episode
-early_stop: float = -150.0           # Early stop criterion
+early_stop: float = -50.0           # Early stop criterion
 batch_size: int   = 10              # size of the batches during epoch
 act_std: float    = 0.25            # standard deviation action distribution
 rng_seed: int     = 666             # Random seed for reproducability
@@ -48,14 +49,16 @@ device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
 writer = SummaryWriter(log_dir = log_dir, flush_secs = 30)
 _      = rng_seed |> pt.manual_seed
 
-## Environment setup
-envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-#obs_dim: int = envs.observation_space[0].shape[0]
-obs_dim: int = envs$[0].target |> len |> (*)$(3)
-#obs_dim: int = envs$[0].target |> len |> (*)$(2)
-act_dim: int = envs.action_space[0].shape[0]
+## Utility
+def write_performance(env: gym.Env, iteration: int) = performance where:
+    target      = env.target
+    performance = env |> .ace |> ac.current_performance
+    for k in target.keys():
+        writer.add_scalars(k , { f"Performance": performance[k]
+                               , f"Target": target[k] }
+                          , iteration)
 
-## Replay Memory
+## Memory
 data Memory( states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
            , rewards: pt.Tensor, values: pt.Tensor, masks: pt.Tensor ):
     def __add__(self, other) = (self, other) |*> zip |> fmap$(pt.cat) |*> Memory
@@ -85,70 +88,61 @@ def crt_net(obs_dim: int) = net where:
                           , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
                           , pt.nn.Linear(64     , 1)  )
 
-def std_deviation(act_dim: int, act_std: float = 0.0) = std where:
-    std = act_dim |> pt.ones$(1,?) |> (*)$(?,act_std)
+data Model( actor: pt.nn.Module, critic: pt.nn.Module
+          , optim: pt.optim.Optimizer, std: float ):
+    def eval_mode(self) = self where:
+        [self.actor, self.critic] |> fmap$(.to(device) .. .eval())
+    def train_mode(self) = self where:
+        [self.actor, self.critic] |> fmap$(.to(device) .. .train())
+    def act_cont( self, states: pt.Tensor) = (π, v) where:
+        μ = states |> self.actor
+        σ = μ |> .shape |> .[1] |> pt.eye |> (*)$(?,self.std) |> .to(device)
+        π = pt.distributions.MultivariateNormal(μ, σ)
+        v = states |> self.critic |> .squeeze()
+    def act_disc(self, states: pt.Tensor) = (π, v) where:
+        μ = states |> self.actor
+        π = μ |> pt.distributions.Categorical
+        v = states |> self.critic |> .squeeze()
 
-def continuous_actor_critic( actor: pt.nn.Module, critic: pt.nn.Module
-                           , std: float, states: pt.Tensor 
-                           ) = (π, v) where:
-    μ = actor(states)
-    #σ = std |> .expand_as(μ) |> pt.diag_embed |> .to(device)
-    σ = μ |> .shape |> .[1] |> pt.eye |> (*)$(?,std) |> .to(device)
-    π = pt.distributions.MultivariateNormal(μ, σ)
-    v = critic(states) |> .squeeze()
+def make_model(act_dim: int, obs_dim: int, std: float) = model where:
+    actor: pt.nn.Module       = act_net(obs_dim, act_dim) |> .to(device)
+    critic: pt.nn.Module      = crt_net(obs_dim)          |> .to(device)
+    policy: pt.nn.ModuleList  = pt.nn.ModuleList([actor, critic])
+    optim: pt.optim.Optimizer = pt.optim.Adam(policy.parameters(), lr = α, betas = βs)
+    model: Model              = Model(actor, critic, optim, std)
 
-def discrete_actor_critic(actor, critic, states) = (π, v) where:
-    μ = actor(states)
-    π = pt.distributions.Categorical(μ)
-    v = critic(states) |> .squeeze()
-
-def update_policy( actor_critic: function, optimizer: pt.optim
-                 , states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
-                 , returns:pt.Tensor, advantages: pt.Tensor 
+def update_policy( model: Model, states: pt.Tensor, actions: pt.Tensor
+                 , logprobs: pt.Tensor, returns:pt.Tensor, advantages: pt.Tensor 
                  ) = losses where:
-    dist,values = actor_critic(states)
+    dist,values = states |> model.act_cont
     entropy     = dist |> .entropy() |> .mean()
-    logprobs_   = dist.log_prob(actions)
+    logprobs_   = actions |> dist.log_prob
     ratios      = (logprobs_ - logprobs) |> pt.exp
     surr_1      = ratios * advantages
     surr_2      = pt.clamp(ratios, 1.0 - ε, 1.0 + ε) * advantages
     loss_act    = (surr_1, surr_2) |*> pt.min |> (-)
     loss_crt    = (returns - values) |> pt.pow$(?,2) |> pt.mean
     losses      = 0.5 * loss_crt + loss_act - η * entropy
-    _           = optimizer         |> .zero_grad()
+    _           = model.optim       |> .zero_grad()
     _           = losses |> pt.mean |> .backward()
-    _           = optimizer         |> .step()
+    _           = model.optim       |> .step()
 
-def subset(obs, inf, pre) = sub where:
-    sub = [ [ i["output-parameters"].index(p)
-              for p in i["output-parameters"] if p.startswith(pre)
-            ] for i in inf 
-          ] |> zip$(?,obs) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-            |> list |> pt.vstack |> .to(device) |> .detach()
+def postprocess(observations, keys) = states where:
+    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+            for key in keys ] 
+    states = [ o[i] for o,i in zip(observations, idx)
+             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
 
-def postprocess(observations, infos) = states where:
-    #p = subset(observations, infos, "performance")
-    #t = subset(observations, infos, "target")
-    #d = (p - t) / t
-    #n = p / t
-    #states       = (n, d) |> pt.hstack
-    states = [ [ i["output-parameters"].index(p) for p in i["output-parameters"] 
-                 if ["performance", "target", "distance"] |> fmap$(p.startswith, ?) |> any 
-               ] for i in infos 
-             ] |> zip$(?,observations) |> starmap$(pt.from_numpy .. ((i,o) -> o[i])) \
-               |> list |> pt.vstack |> .to(device) |> .detach()
-    #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
-
-def trajectories( actor_critic: function, envs: gace.envs.vec.VecACE
+def trajectories( model: Model, envs: gace.envs.vec.VecACE
                 , states: pt.Tensor ) = (memories, next_states) where:
-    dist,values = actor_critic(states)
-    actions     = dist.sample() |> .detach()
+    dist,values = states |> model.act_cont
+    actions     = dist |> .sample() |> .detach()
     logprobs    = actions |> dist.log_prob
     observations,rewards_,dones,infos \
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    next_states = postprocess(observations, infos)
+    next_states = postprocess(observations, [i["output-parameters"] for i in infos])
     masks       = dones |> pt.Tensor |> .to(device) |> (-)$(1,?)
     rewards     = rewards_ |> pt.Tensor |> .to(device)
     memories    = Memory(states,actions,logprobs,rewards,values,masks)
@@ -162,103 +156,63 @@ def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
               , l, i ) |> .[:-1]
     a = v + g
 
-def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
-                   , optimizer: pt.optim, checkpoint_file: str
-                   ) = res where:
-    state_dicts = [actor, critic, optimizer] |> fmap$(.state_dict())
-    save_dict   = state_dicts |> (,)$(["actor", "critic", "optimizer"],?) \
-                |*> zip |> dict
-    res = pt.save(save_dict, checkpoint_file)
+def save_checkpoint( model: Model, checkpoint_file: str) = res where:
+    state_dicts = [model.actor, model.critic, model.optim] |> fmap$(.state_dict())
+    state_keys  = ["actor", "critic", "optim"]
+    save_dict   = (state_keys, state_dicts) |*> zip |> dict 
+    res         = pt.save(save_dict, checkpoint_file)
 
-def write_performance(env: gym.Env, iteration: int) = performance where:
-    target      = env.target
-    performance = env |> .ace |> ac.current_performance
-    for k in target.keys():
-        writer.add_scalars(k , { f"Performance": performance[k]
-                               , f"Target": target[k] }
-                          , iteration)
+def traject(model, envs, (memories,states), step) = (memories_, states_) where:
+    t0             = time.time()
+    memory,states_ = trajectories(model, envs, states)
+    memories_      = memory + memories
+    t1             = time.time()
+    if verbose:
+        r = memory.rewards.mean()
+        print(f"Step {step:03} took {(t1 - t0):.3f}s | Average Reward: {r:.3f}")
+    writer.add_scalar("_Reward_Mean", memory.rewards.mean(), step)
 
-def run_episode(_, _, _, True, loss, reward) = (loss, reward)
-addpattern def run_episode( episode, iteration, states, _, loss, reward
-                          ) = run_episode( episode, iteration + 1, next_states
-                                         , done, loss_, reward_ )  where:
-    def traject((memories,states), step) = (memories_, states_) where:
-        t0             = time.time()
-        memory,states_ = trajectories(actor_critic, envs, states)
-        memories_      = memory + memories
-        t1             = time.time()
-        if verbose:
-            r = memory.rewards.mean()
-            print(f"Step {step:03}/{num_steps} took {(t1 - t0):.3f}s | Average Reward: {r:.3f}")
-        #writer.add_scalars("_Step_Reward", {f"Iter_{iteration}": memory.rewards.mean()}, step)
-    def train(epoch, loader) = loss |> pt.mean where:
-        t0   = time.time()
-        loss = starmap(update, loader) |> list |> pt.cat
-        t1   = time.time()
-        writer.add_scalars("_Epoch_Loss_Mean", {f"Iter_{iteration}": loss.mean().item()}, epoch)
-        writer.add_scalars("_Epoch_Loss_Sum", {f"Iter_{iteration}": loss.sum().item()}, epoch)
-    _          = policy.eval()
+def train(model, epoch, loader) = loss |> pt.mean where:
+    t0   = time.time()
+    loss = starmap(update_policy$(model), loader) |> list |> pt.cat
+    t1   = time.time()
+    writer.add_scalar("_Loss_Mean", loss.mean().item(), epoch)
+
+def run_episode(_, _, _, _, _, True, loss, reward) = model where:
+    total   = reward |> .sum() |> .item()
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    _       = writer.add_scalar("_Loss_Sum", loss.sum().item(), epoch)
+    if verbose:
+        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
+addpattern def run_episode(envs, model, episode, iteration, states, _, loss, reward
+                          ) = run_episode( envs, model, episode, iteration_
+                                         , next_states, done, loss_, reward_ 
+                                         ) where:
+    _          = model.eval_mode()
     with pt.no_grad(): 
         memories_,next_states \
-               = reduce(traject, range(num_steps)
+               = reduce( traject$(model, envs), range(num_steps)
                        , ( pt.empty(0) |> .to(device) |> repeat |> .$[:6] |*> Memory
                          , states ))
     _          = envs |> .gace_envs |> .[0] |> write_performance$(?, iteration )
-    _          = policy.train()
+    _          = model.train_mode()
     loader     = data_loader(memories_)
-    losses     = [ train(epoch, loader) for epoch in num_epochs |> range 
+    losses     = [ train(model, epoch, loader) for epoch in num_epochs |> range 
                  ] |> pt.stack  |> .detach()
     done_      = .item() .. pt.all .. .bool() <| (1 - memories_.masks)
     stop_      = (memories_.rewards |> pt.mean |> .item()) < early_stop
     done       = done_ or stop_ or (iteration >= max_iter)
     loss_      = pt.cat((loss, losses))
     reward_    = pt.cat((reward, memories_.rewards))
+    iteration_ = iteration + 1
     if verbose:
         r = memories_.rewards.mean().item()
         print(f"Epsiode {episode:03}, Iteration {iteration:03} | Average Reward {r:.3f}")
-        if done_:
-            print(f"All Environments Done")
-        if stop_:
-            print(f"All Environments Failed")
-        if (iteration >= max_iter):
-            print(f"All Environments rain out of Steps")
-    _          = save_checkpoint(actor, critic, optimizer, model_path)
-    writer.add_scalars(f"_Loss_Mean", {f"Episode_{episode}": loss_.mean().item()}, iteration)
-    writer.add_scalars(f"_Reward_Mean", {f"Epsiode_{episode}": reward_.sum().item()}, iteration)
+    _          = save_checkpoint(model, model_path)
 
-def run_episodes(episode: int) = (act,crt) where:
-    _ = actor.to(device)
-    _ = critic.to(device)
-    if verbose:
-        print(f"Starting Episode {episode:03}")
-    states = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
+def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
+                ) = model where:
+    obs     = envs.reset()
+    states  = postprocess(obs, envs.observation_keys)
     l = r = pt.empty(0) |> .to(device = device)
-    losses,rewards = run_episode(episode, 0, states, False, l, r)
-    writer.add_scalar(f"_Epsiode_Loss", losses.mean().item(), episode)
-    writer.add_scalar(f"_Episode_Reward", rewards.mean().item(), episode)
-    for i in losses |> len |> range:
-        writer.add_scalars(f"Epsiode_Loss", {f"Episode_{episode}": losses[i]}, i)
-        writer.add_scalars(f"Epsiode_Reward", {f"Episode_{episode}": rewards[i]}, i)
-    if verbose:
-        print(f"Episode {episode:03} | Total Reward: {rewards.sum():.3f}")
-        print(f"Episode {episode:03} | Average Loss: {losses.mean():.3f}")
-        print(f"Finished Episode {episode:03}")
-    act = .cpu() .. .eval() <| actor
-    crt = .cpu() .. .eval() <| critic
-
-## Actor Critic Model
-actor: pt.nn.Module        = act_net(obs_dim, act_dim) |> .to(device)
-critic: pt.nn.Module       = crt_net(obs_dim) |> .to(device)
-#deviation: pt.nn.Parameter = std_deviation(act_dim, act_std) |> .to(device)
-policy: pt.nn.ModuleList   = pt.nn.ModuleList([actor, critic])
-
-actor_critic: function     = continuous_actor_critic$(actor, critic, act_std)
-#actor_critic: function     = continuous_actor_critic$(actor, critic, deviation)
-#actor_critic: function     = discrete_actor_critic$(actor, critic)
-
-optimizer: pt.optim        = pt.optim.Adam(policy.parameters(), lr = α, betas = βs)
-#actor_optim: pt.optim      = pt.optim.Adam(actor.parameters(), lr = α, betas = βs)
-#critic_optim: pt.optim     = pt.optim.Adam(critic.parameters(), lr = α, betas = βs)
-
-#update: function           = update_policy$(actor_critic, actor_optim, critic_optim)
-update: function           = update_policy$(actor_critic, optimizer)
+    losses,rewards = run_episode(envs, model, episode, 0, states, False, l, r)
