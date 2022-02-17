@@ -1,9 +1,7 @@
 # GAC²EIR
 
-Reinforcement Learning Agents for solving
-[GAC²E](https://github.com/augustunderground/gace).
-Currently only AC Methods are implemented. I'm focusing on Continuous Control
-Agents. 
+Clean and Self Contained implementations of Reinforcement Learning Agents for
+solving [GAC²E](https://github.com/augustunderground/gace).
 
 ## Usage
 
@@ -22,7 +20,7 @@ My personal notes on implementing the algorithms.
 
 ## Proximal Policy Optimization (PPO)
 
-[ Proximal Policy Optimization Algorithm](https://arxiv.org/abs/1707.06347)
+[Proximal Policy Optimization Algorithm](https://arxiv.org/abs/1707.06347)
 
 - Keep track of small, fixed length batch of trajectories (s,a,r,d,v,l)
 - Multiple epochs for each batch

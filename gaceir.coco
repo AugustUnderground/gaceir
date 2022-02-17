@@ -1,20 +1,54 @@
 import coconut.convenience
-#import algorithm.ppo as ppo
+import algorithm.ppo as ppo
 #import algorithm.td3 as td3
-import algorithm.sac as sac
+#import algorithm.sac as sac
 import os, time, datetime
 import torch as pt
 import hace as ac
 import gym, gace
+from hy.core import *
+from hy.core.language import *
+from hy.contrib.pprint import pp
+
+## Environment setup
+ace_id: str      = "op2"
+ace_backend: str = "xh035"
+ace_variant: int = 0
+env_id: str      = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
+num_envs: int    = 50
+obs_dim: int     = 32
+act_dim: int     = 10
+
+#envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+#obs_dim: int               = envs.observation_space[0].shape[0]
+#obs_dim: int               = envs$[0].target |> len |> (*)$(3) |> (+)$(2)
+#act_dim: int               = envs.action_space[0].shape[0]
+
+## Run Wrapper Deleting and Recreating the Environment
+def run(episode: int, run_fun) = results where:
+    print(f"Starting Episode {episode}. Creating Environments ...")
+    environments = gace.vector_make_same(env_id, num_envs)
+    print(f"Done. Running ...")
+    results = run_fun(environments, episode)
+    print(f"Finished Episode run. Closing Environments.")
+    environments.close()
+    print(f"All Environments closed. Deleting Objects.")
+    del environments
+    time.sleep(5)
+    os.system("killall spectre")
+    print(f"Finished Episode {episode}.")
 
 ## PPO
-#models = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#a,c = [ppo.run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
+model: ppo.Model = ppo.make_model(act_dim, obs_dim, ppo.act_std)
+mdl = [run(eps, ppo.run_episodes$(model)) for eps in range(ppo.num_episodes)] |*> zip |> tuple
+#mdl = [run(eps, ppo.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
 
 ## TD3
-#models = [td3.run_episodes(e) for e in range(2)] |*> zip |> tuple
-#a,c1,c2 = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
+model: td3.Model = td3.make_model(act_dim, obs_dim)
+mdl = [run(eps, td3.run_episodes$(model)) for eps in range(td3.num_episodes)] |*> zip |> tuple
+#mdl = [run(eps, td3.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
 
 ## SAC
-#models = [sac.run_episode(e) for e in range(2)] |*> zip |> tuple
-v,c,a = [sac.run_episode(e) for e in range(sac.num_episodes)] |*> zip |> tuple
+model: sac.Model = sac.make_model(act_dim, obs_dim)
+mdl = [run(eps, sac.run_episodes$(model)) for eps in range(sac.num_episodes)] |*> zip |> tuple
+#mdl = [run(eps, sac.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
