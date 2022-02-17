@@ -216,9 +216,6 @@ Where
 ## Things TODO
 
 - [X] Implement replay buffer / memory as algebraic data type
-- [X] Implement PPO (Probabilistic)
-- [X] Implement TD3 (Deterministic)
-- [X] Implement SAC (Probabilistic)
 - [X] Include step count in reward
 - [ ] Try Discrete action spaces
 - [ ] Normalize and/or reduce observation space
