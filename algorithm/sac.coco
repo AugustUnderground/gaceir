@@ -15,7 +15,7 @@ import hace as ac
 verbose: bool        = True            # Print verbose debug output
 #num_envs: int        = os.sched_getaffinity(0) |> len |> (//)$(?,2)
 num_envs: int        = 50              # Number of parallel env pool
-num_episodes: int    = 100             # Number of episodes to play
+num_episodes: int    = 666             # Number of episodes to play
 num_steps: int       = 100             # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
 early_stop: float    = -50.0           # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
@@ -82,6 +82,12 @@ data HStack() from pt.nn.Module:
 data VStack() from pt.nn.Module:
     def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.vstack
 
+## Weight initializer for final Layers
+def init_weights(m: pt.nn.Module, init: float):
+    if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
+        m.weight.data.uniform_(-init, init)
+        m.bias.data.uniform_(-init, init)
+
 ## Value Network
 data ValueNet(obs_dim: int) from pt.nn.Module:
     def __init__(self, obs_dim: int):
@@ -117,6 +123,8 @@ data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float =
         self.relu  = pt.nn.functional.relu
         self.min_σ = σ_min
         self.max_σ = σ_max
+        self.lin_σ.weight.data.uniform_(-3e-3, 3e-3)
+        self.lin_σ.bias.data.uniform_(-3e-3, 3e-3)
     def forward(self, state: pt.Tensor) = (μ, σ) where:
         x = state |> self.lin_1 |> self.relu |> self.lin_2 |> self.relu |> self.lin_3
         μ = x |> self.lin_μ
@@ -141,19 +149,24 @@ def sync_params(target, online) = target where:
     _ = [target, online] |> fmap$(fmap$(.data) .. list .. .parameters()) |*> zip \
       |> starmap$((t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_, ?) |> list
 
-## Agent Setup
+## Loss functions
 q_criterion = pt.nn.MSELoss()
 v_criterion = pt.nn.MSELoss()
 
-value_online = ValueNet(obs_dim) |> .to(device)
-value_target = ValueNet(obs_dim) |> .to(device)
-
-for tp,op in [value_target, value_online] |> fmap$(.parameters()) |*> zip:
-    op |> .data |> tp.data.copy_
-
+## Online Networks
+value_online  = ValueNet(obs_dim) |> .to(device)
 critic_online = CriticNet(obs_dim, act_dim) |> .to(device)
 actor_online  = ActorNet(obs_dim, act_dim) |> .to(device)
 
+_ = [ init_weights$(?,3e-3) |> n.apply 
+      for n in [ value_online, critic_online, actor_online ] ]
+
+## Value Target Network
+value_target = ValueNet(obs_dim) |> .to(device)
+for tp,op in [value_target, value_online] |> fmap$(.parameters()) |*> zip:
+    op |> .data |> tp.data.copy_
+
+## Optimizers For all Networks
 v_optim = pt.optim.Adam(value_online.parameters(), lr = α, betas = βs)
 q_optim = pt.optim.Adam(critic_online.parameters(), lr = α, betas = βs)
 p_optim = pt.optim.Adam(actor_online.parameters(), lr = α, betas = βs)
@@ -215,6 +228,7 @@ def postprocess(observations, infos) = states where:
                |> list |> pt.vstack |> .to(device) |> .detach()
     #states = observations |> fmap$pt.from_numpy |> pt.vstack |> .to(device) |> .detach() 
 
+## Checkpoint Saving
 def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
                    , value: pt.nn.Module, checkpoint_file: str
                    ) = res where:
@@ -223,7 +237,8 @@ def save_checkpoint( actor: pt.nn.Module, critic: pt.nn.Module
                 |*> zip |> dict
     res = pt.save(save_dict, checkpoint_file)
 
-def train(_, _, True, _, _) = (value_target, critic_online, actor_online)
+## Training Loop
+def train(_, _, True, buffer, _) = buffer
 addpattern def train( episode, iteration, finish, buffer, states
                     ) = train( episode, iteration_, finish_, buffer_, states_
                              ) where:
@@ -248,9 +263,13 @@ addpattern def train( episode, iteration, finish, buffer, states
     if verbose:
         print(f"Iteration {iteration:03} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")
     _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
-    _           = save_checkpoint(actor_online, critic_online, value_target, model_path)
+    _           = save_checkpoint(actor_online, critic_online, value_online, model_path)
 
-def run_episode(episode: int) = (v,c,a) where:
+## Episode Loop
+def run_episode(episode: int) = (value_target,critic_online,actor_online) where:
     states  = envs.reset() |> fmap$(.[:obs_dim] .. pt.from_numpy) |> pt.vstack |> .to(device)
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
-    v,c,a   = train(episode, 0, False, buffer, states)
+    buffer_ = train(episode, 0, False, buffer, states)
+    total   = buffer_.reward |> .sum() |> .item()
+    _       = f"Episode {episode:03} Finished | Total Reward: {total}" |> print
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)

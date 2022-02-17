@@ -8,12 +8,13 @@ import hace as ac
 import gym, gace
 
 ## PPO
-#actor, critic = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
-a,c = [ppo.run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
+#models = [ppo.run_episodes(e) for e in range(2)] |*> zip |> tuple
+#a,c = [ppo.run_episodes(e) for e in range(ppo.num_episodes)] |*> zip |> tuple
 
 ## TD3
 #models = [td3.run_episodes(e) for e in range(2)] |*> zip |> tuple
-a,c1,c2 = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
+#a,c1,c2 = [td3.run_episodes(e) for e in range(td3.num_episodes)] |*> zip |> tuple
 
 ## SAC
+#models = [sac.run_episode(e) for e in range(2)] |*> zip |> tuple
 v,c,a = [sac.run_episode(e) for e in range(sac.num_episodes)] |*> zip |> tuple
