@@ -24,13 +24,14 @@ ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Envir
 ace_variant: int     = 0               # ACE Environment variant
 γ: float             = 0.99            # Discount Factor
 τ_soft: float        = 1e-2            # Avantage Factor
-α: float             = 3e-4            # Learning Rate
+α: float             = 3e-2            # Learning Rate
 βs: tuple[float]     = (β1, β2) where: # Weight Decay
-    β1: float        = 0.9
-    β2: float        = 0.999
+    β1: float        = 0.5 # 0.9
+    β2: float        = 0.3 # 0.999
 σ_min: float = -2                      # Lower Clipping
 σ_max: float = 20                      # Upper Clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
+max_time: float      = 20.0            # Maximum time to cut off
 
 ## Setup
 env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
@@ -62,9 +63,9 @@ data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
                   then other |*> ReplayBuffer |> fmap$(.[-buffer_size:])
                   else zip(self,other) |> fmap$(.[-buffer_size:] .. pt.vstack) |*> ReplayBuffer)
     def sample(self, batch_size: int) = smpl where:
-        idx = self.state |> .shape |> .[0] |> pt.randperm |> .[:batch_size] |> .tolist()
-        smpl = (e[idx,:] for e in self) |*> ReplayBuffer
-    def size(self) = self.state |> .shape |> .[0] |> float
+        idx = self.size() |> pt.randperm |> .[:batch_size] |> .tolist()
+        smpl = (m[idx,:] for m in self) |> tuple |*> ReplayBuffer
+    def size(self) = self.state |> .shape |> .[0] |> int
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -198,8 +199,9 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
 
 ## Exploration
-def postprocess(observations, keys) = states where:
-    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+def postprocess(observations, keys: [str]) = states where:
+    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
+                          , ?) |> map$((p) -> p |> key.index) |> list
             for key in keys ] 
     states = [ o[i] for o,i in zip(observations, idx)
              ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
@@ -223,8 +225,8 @@ def run_episode(_, model, episode, _, True, buffer, _) = model where:
 addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states
                           ) = run_episode( envs, model, episode, iteration_
                                          , finish_, buffer_, states_ ) where:
-    t0 = time.time()
-    actions     = model.act(states)
+    t0          = time.time()
+    actions     = states |> model.act
     observations,rewards_,dones_,infos \
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
@@ -234,15 +236,16 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     buffer_     = (states, actions, rewards, states_, dones) \
                 |*> ReplayBuffer |> buffer.push
-    t1 = time.time()
+    t1          = time.time()
+    dt          = t1 - t0
     _           = envs$[0] |> write_performance$(?, iteration)
     _           = soft_q_update(iteration, model, buffer_, batch_size)
     done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
-    finish_     = done_ or stop_ or (iteration >= num_steps)
+    finish_     = done_ or stop_ or (iteration >= num_steps) or (dt > max_time)
     iteration_  = iteration + 1
     if verbose:
-        print(f"Iteration {iteration:03} took {(t1 - t0):.3f}s | Average Reward: {rewards.mean():.3f}")
+        f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
     _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
     _           = save_checkpoint(model, model_path)
 
@@ -250,6 +253,6 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                ) = model where:
     obs     = envs.reset()
-    states  = postprocess(obs, envs.observation_keys)
+    states  = postprocess(obs, [i["output-parameters"] for i in envs.info])
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
     model   = run_episode(envs, model, episode, 0, False, buffer, states)

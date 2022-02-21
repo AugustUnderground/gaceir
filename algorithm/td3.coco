@@ -179,10 +179,10 @@ def update(epoch, model, buffer) = (q1_loss, q2_loss, π_loss) where:
     #if verbose:
     #    print(f"Epoch {epoch:03} | Q Loss: {q1_loss:3f}, {q2_loss:3f}")
 
-
 ## Exploration
-def postprocess(observations, keys) = states where:
-    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+def postprocess(observations, keys: [str]) = states where:
+    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
+                          , ?) |> map$((p) -> p |> key.index) |> list
             for key in keys ] 
     states = [ o[i] for o,i in zip(observations, idx)
              ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
@@ -246,7 +246,7 @@ addpattern def run_episode( envs, model, episode, iteration, states, buffer, don
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                 ) = model where:
     obs     = envs.reset()
-    states  = postprocess(obs, envs.observation_keys)
+    states  = postprocess(obs, envs.info[0]["output-parameters"])
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
     memory  = run_episode(envs, model, episode, 0, states, buffer, False)
     _       = model.eval_mode()

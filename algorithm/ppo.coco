@@ -125,8 +125,9 @@ def update_policy( model: Model, states: pt.Tensor, actions: pt.Tensor
     _           = model.optim       |> .step()
 
 ## Exploration
-def postprocess(observations, keys) = states where:
-    idx = [ key |> filter$((k) -> ":" not in k, ?) |> map$((p) -> p |> key.index) |> list
+def postprocess(observations, keys: [str]) = states where:
+    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
+                          , ?) |> map$((p) -> p |> key.index) |> list
             for key in keys ] 
     states = [ o[i] for o,i in zip(observations, idx)
              ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
@@ -214,6 +215,6 @@ addpattern def run_episode(envs, model, episode, iteration, states, _, loss, rew
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                 ) = model where:
     obs     = envs.reset()
-    states  = postprocess(obs, envs.observation_keys)
+    states  = postprocess(obs, envs.info[0]["output-parameters"])
     l = r = pt.empty(0) |> .to(device = device)
     losses,rewards = run_episode(envs, model, episode, 0, states, False, l, r)

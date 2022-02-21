@@ -20,24 +20,25 @@ num_envs: int    = 50
 obs_dim: int     = 32
 act_dim: int     = 10
 
-#envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+
 #obs_dim: int               = envs.observation_space[0].shape[0]
 #obs_dim: int               = envs$[0].target |> len |> (*)$(3) |> (+)$(2)
 #act_dim: int               = envs.action_space[0].shape[0]
 
 ## Run Wrapper Deleting and Recreating the Environment
 def run(episode: int, run_fun) = results where:
-    print(f"Starting Episode {episode}. Creating Environments ...")
-    environments = gace.vector_make_same(env_id, num_envs)
-    print(f"Done. Running ...")
-    results = run_fun(environments, episode)
-    print(f"Finished Episode run. Closing Environments.")
-    environments.close()
-    print(f"All Environments closed. Deleting Objects.")
-    del environments
-    time.sleep(5)
-    os.system("killall spectre")
-    print(f"Finished Episode {episode}.")
+    global envs
+    print(f"Starting Episode {episode} run ...")
+    try:
+        results = run_fun(envs, episode)
+    except ac.AcePoolCorruptionException as err:
+        print(f"Episode {episode} stopped early due to error\n\t{err}\nResetting ...")
+        del envs
+        envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+        results = None
+    else:
+        print(f"Finished Episode {episode}.")
 
 ## PPO
 model: ppo.Model = ppo.make_model(act_dim, obs_dim, ppo.act_std)
@@ -48,8 +49,9 @@ mdl = [run(eps, ppo.run_episodes$(model)) for eps in range(ppo.num_episodes)] |*
 model: td3.Model = td3.make_model(act_dim, obs_dim)
 mdl = [run(eps, td3.run_episodes$(model)) for eps in range(td3.num_episodes)] |*> zip |> tuple
 #mdl = [run(eps, td3.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
+#mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
 
 ## SAC
 model: sac.Model = sac.make_model(act_dim, obs_dim)
 mdl = [run(eps, sac.run_episodes$(model)) for eps in range(sac.num_episodes)] |*> zip |> tuple
-#mdl = [run(eps, sac.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
+#mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
