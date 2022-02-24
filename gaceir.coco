@@ -7,8 +7,8 @@ from hy.core import *
 from hy.core.language import *
 from hy.contrib.pprint import pp
 
-import algorithm.ppo as ppo
-import algorithm.td3 as td3
+#import algorithm.ppo as ppo
+#import algorithm.td3 as td3
 import algorithm.sac as sac
 
 ## Environment setup
@@ -17,12 +17,12 @@ ace_backend: str = "xh035"
 ace_variant: int = 0
 env_id: str      = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
 num_envs: int    = 50
-#obs_dim: int     = 48
-#act_dim: int     = 10
+obs_dim: int     = 58
+act_dim: int     = 10
 
 envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-obs_dim: int               = envs.observation_space[0].shape[0]
-act_dim: int               = envs.action_space[0].shape[0]
+#obs_dim: int               = envs.observation_space[0].shape[0]
+#act_dim: int               = envs.action_space[0].shape[0]
 #obs_dim: int               = envs$[0].target |> len |> (*)$(3) |> (+)$(2)
 
 ## Run Wrapper Deleting and Recreating the Environment

@@ -124,8 +124,8 @@ data Model( actor_online: pt.nn.Module, critic_online: pt.nn.Module
         source = other if other else self.value_online
         target = self.value_target
         update = (t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_
-        _ = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
-                                       ) |*> zip |> starmap$(update, ?) |> list
+        _      = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
+                                            ) |*> zip |> starmap$(update, ?) |> list
     def act(self, state: pt.Tensor) = a where:
         μ,σ_ = state |> self.actor_online
         σ    = σ_ |> pt.exp
@@ -200,17 +200,19 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
 
 ## Exploration
 def postprocess(observations, keys: dict[str,list[str]]) = states where:
-    pf    = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
-    p_idx = keys["observations"] |> filter$(pf) \
-                                 |> fmap$(keys["observations"].index) \
-                                 |> list
-    i_idx = [k |> keys["observations"].index for k in keys["actions"]]
-    idx   = p_idx + i_idx
-    log_idx = filter( (k) -> k in ["ugbw", "sr_f", "sr_r"], keys
-                    ) |> fmap$(keys["observations"].index) |> list
-    states = [ obs[idx] |> pt.from_numpy for obs in observations
-             ] |> pt.vstack |> .to(device)
-    states[:,log_idx] = states[:,log_idx] |> pt.log
+    pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
+    p_idx   = keys["observations"] |> filter$(pf) \
+                                   |> fmap$(keys["observations"].index) \
+                                   |> list
+    i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
+    idx     = p_idx + i_idx
+    l_idx   = filter( (k) -> k in ["ugbw", "sr_f", "sr_r"] or k.endswith("fug")
+                    , keys ) |> fmap$(keys["observations"].index) |> list
+    states_ = [ obs[idx] |> pt.from_numpy for obs in observations
+              ] |> pt.vstack |> .to(device)
+    l_msk   = map( (in)$(?,l_idx), states_.shape[0] |> range
+                 ) |> list |> pt.Tensor |> .to(bool)
+    states  = pt.log10(states_ * l_msk) + (states_ * (1 - l_msk))
     #states = [ obs |> pt.from_numpy for obs in observations
     #         ] |> pt.vstack |> .to(device)
 
