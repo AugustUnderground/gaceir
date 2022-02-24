@@ -17,14 +17,13 @@ ace_backend: str = "xh035"
 ace_variant: int = 0
 env_id: str      = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
 num_envs: int    = 50
-obs_dim: int     = 32
-act_dim: int     = 10
+#obs_dim: int     = 48
+#act_dim: int     = 10
 
 envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-
-#obs_dim: int               = envs.observation_space[0].shape[0]
+obs_dim: int               = envs.observation_space[0].shape[0]
+act_dim: int               = envs.action_space[0].shape[0]
 #obs_dim: int               = envs$[0].target |> len |> (*)$(3) |> (+)$(2)
-#act_dim: int               = envs.action_space[0].shape[0]
 
 ## Run Wrapper Deleting and Recreating the Environment
 def run(episode: int, run_fun) = results where:
