@@ -201,18 +201,17 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
 ## Exploration
 def postprocess(observations, keys: dict[str,list[str]]) = states where:
     pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
+    lf      = (k) -> k in ["ugbw", "cof", "sr_f", "sr_r"] or k.endswith("fug")
     p_idx   = keys["observations"] |> filter$(pf) \
                                    |> fmap$(keys["observations"].index) \
                                    |> list
     i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
-    idx     = p_idx + i_idx
-    l_idx   = filter( (k) -> k in ["ugbw", "sr_f", "sr_r"] or k.endswith("fug")
-                    , keys ) |> fmap$(keys["observations"].index) |> list
-    states_ = [ obs[idx] |> pt.from_numpy for obs in observations
-              ] |> pt.vstack |> .to(device)
-    l_msk   = map( (in)$(?,l_idx), states_.shape[0] |> range
-                 ) |> list |> pt.Tensor |> .to(bool)
-    states  = pt.log10(states_ * l_msk) + (states_ * (1 - l_msk))
+    idx     = (p_idx + i_idx) |> sorted
+    l_msk   = keys["observations"] |> map$(lf, ?) |> list  |> pt.Tensor |> .to(device)
+    of      = (o) -> (pt.where(o > 0, pt.log10(o), o) * l_msk) + (o * (1 - l_msk))
+    states  = [ obs |> pt.from_numpy |> .to(device) |> of |> .[idx] 
+                for obs in observations ] |> pt.vstack
+    #states  = (pt.log10(states_) *  l_msk) + (states_ * (~l_msk))
     #states = [ obs |> pt.from_numpy for obs in observations
     #         ] |> pt.vstack |> .to(device)
 
