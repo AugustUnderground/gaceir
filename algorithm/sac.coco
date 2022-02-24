@@ -15,7 +15,7 @@ import hace as ac
 verbose: bool        = True            # Print verbose debug output
 num_episodes: int    = 666             # Number of episodes to play
 num_steps: int       = 100             # How many steps to take
-early_stop: float    = -50.0           # Early stop criterion
+early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
 algorithm: str       = "sac"           # Name of used algorithm ∈  ./algorithm
@@ -199,12 +199,20 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
 
 ## Exploration
-def postprocess(observations, keys: [str]) = states where:
-    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
-                          , ?) |> map$((p) -> p |> key.index) |> list
-            for key in keys ] 
-    states = [ o[i] for o,i in zip(observations, idx)
-             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
+def postprocess(observations, keys: dict[str,list[str]]) = states where:
+    pf    = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
+    p_idx = keys["observations"] |> filter$(pf) \
+                                 |> fmap$(keys["observations"].index) \
+                                 |> list
+    i_idx = [k |> keys["observations"].index for k in keys["actions"]]
+    idx   = p_idx + i_idx
+    log_idx = filter( (k) -> k in ["ugbw", "sr_f", "sr_r"], keys
+                    ) |> fmap$(keys["observations"].index) |> list
+    states = [ obs[idx] |> pt.from_numpy for obs in observations
+             ] |> pt.vstack |> .to(device)
+    states[:,log_idx] = states[:,log_idx] |> pt.log
+    #states = [ obs |> pt.from_numpy for obs in observations
+    #         ] |> pt.vstack |> .to(device)
 
 ## Checkpoint Saving
 def save_checkpoint(model: Model, checkpoint_file: str) = res where:
@@ -231,7 +239,7 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    states_     = postprocess(observations, [i["output-parameters"] for i in infos])
+    states_     = postprocess(observations, envs.info[0])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     buffer_     = (states, actions, rewards, states_, dones) \
@@ -253,6 +261,6 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                ) = model where:
     obs     = envs.reset()
-    states  = postprocess(obs, [i["output-parameters"] for i in envs.info])
+    states  = postprocess(obs, envs.info[0])
     buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
     model   = run_episode(envs, model, episode, 0, False, buffer, states)
