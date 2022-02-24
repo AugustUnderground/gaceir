@@ -21,5 +21,6 @@ gaceir/*$py.class
 
 runs
 models
+archive
 *.log
 *.out
