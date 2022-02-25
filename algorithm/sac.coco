@@ -64,7 +64,7 @@ data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
     def __len__(self) = self.state |> .shape |> .[0] |> int
     def __add__(self, other: ReplayBuffer) = buf where:
         buf = other |> map$(.to(device)) |> zip$(self, ?) \
-                    |> map$(.[-batch_size:] .. pt.cat) |*> ReplayBuffer
+                    |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
