@@ -10,6 +10,7 @@ from hy.contrib.pprint import pp
 #import algorithm.ppo as ppo
 #import algorithm.td3 as td3
 import algorithm.sac as sac
+#import algorithm.std as std
 
 ## Environment setup
 ace_id: str      = "op2"
@@ -53,4 +54,9 @@ mdl = [run(eps, td3.run_episodes$(model)) for eps in range(td3.num_episodes)] |*
 ## SAC
 model: sac.Model = sac.make_model(act_dim, obs_dim)
 mdl = [run(eps, sac.run_episodes$(model)) for eps in range(sac.num_episodes)] |*> zip |> tuple
+#mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
+
+## STD
+model: std.Model = std.make_model(act_dim, obs_dim)
+mdl = [run(eps, std.run_episodes$(model)) for eps in range(sac.num_episodes)] |*> zip |> tuple
 #mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple

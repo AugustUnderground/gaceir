@@ -14,20 +14,20 @@ import hace as ac
 ## Defaults (as args later)
 verbose: bool        = True            # Print verbose debug output
 num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 100             # How many steps to take
+num_steps: int       = 1000            # How many steps to take
 early_stop: float    = -500.0          # Early stop criterion
-batch_size: int      = 100             # size of the batches during epoch
+batch_size: int      = 200             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
 algorithm: str       = "sac"           # Name of used algorithm ∈  ./algorithm
 ace_id: str          = "op2"           # ACE Identifier of the Environment
 ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Environment
 ace_variant: int     = 0               # ACE Environment variant
 γ: float             = 0.99            # Discount Factor
-τ_soft: float        = 1e-2            # Avantage Factor
-α: float             = 3e-2            # Learning Rate
+τ_soft: float        = 5e-3            # Avantage Factor
+α: float             = 3e-4            # Learning Rate
 βs: tuple[float]     = (β1, β2) where: # Weight Decay
-    β1: float        = 0.5 # 0.9
-    β2: float        = 0.3 # 0.999
+    β1: float        = 0.9      # 0.9
+    β2: float        = 0.999    # 0.999
 σ_min: float = -2                      # Lower Clipping
 σ_max: float = 20                      # Upper Clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
@@ -58,14 +58,13 @@ def write_performance(env: gym.Env, step: int) = performance where:
 ## Replay Buffer
 data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
                  , next_state: pt.Tensor, done: pt.Tensor ):
-    def push(self, other) = new where:
-        new = (if len(self.state) <= 0 
-                  then other |*> ReplayBuffer |> fmap$(.[-buffer_size:])
-                  else zip(self,other) |> fmap$(.[-buffer_size:] .. pt.vstack) |*> ReplayBuffer)
     def sample(self, batch_size: int) = smpl where:
-        idx = self.size() |> pt.randperm |> .[:batch_size] |> .tolist()
+        idx = len(self) |> pt.randperm |> .[:batch_size] |> .tolist()
         smpl = (m[idx,:] for m in self) |> tuple |*> ReplayBuffer
-    def size(self) = self.state |> .shape |> .[0] |> int
+    def __len__(self) = self.state |> .shape |> .[0] |> int
+    def __add__(self, other: ReplayBuffer) = buf where:
+        buf = other |> map$(.to(device)) |> zip$(self, ?) \
+                    |> map$(.[-batch_size:] .. pt.cat) |*> ReplayBuffer
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -162,12 +161,16 @@ def make_model(act_dim: int, obs_dim: int) = model where:
                          , actor_optim, critic_optim, value_optim
                          , critic_loss, value_loss )
 
+def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
+    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
+
 ## Update
 def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
                  , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
                  , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
-    states, actions, rewards, next_states, dones \
+    states, actions, rewards_, next_states, dones \
                 = buffer.sample(batch_size) |> fmap$(.to(device))
+    rewards     = rewards_ |> scale_rewards
     v_expected  = model.value_online(states)
     q_expected  = model.critic_online(states, actions)
     new_actions, log_prob, z, μ, σ \
@@ -243,15 +246,15 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
     states_     = postprocess(observations, envs.info[0])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    buffer_     = (states, actions, rewards, states_, dones) \
-                |*> ReplayBuffer |> buffer.push
+    buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones) 
     t1          = time.time()
     dt          = t1 - t0
     _           = envs$[0] |> write_performance$(?, iteration)
-    _           = soft_q_update(iteration, model, buffer_, batch_size)
+    if len(buffer_) > batch_size:
+        soft_q_update(iteration, model, buffer_, batch_size)
     done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
-    finish_     = done_ or stop_ or (iteration >= num_steps) or (dt > max_time)
+    finish_     = done_ or stop_ or (iteration >= num_steps)# or (dt > max_time)
     iteration_  = iteration + 1
     if verbose:
         f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
@@ -263,5 +266,5 @@ def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                ) = model where:
     obs     = envs.reset()
     states  = postprocess(obs, envs.info[0])
-    buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    buffer  = pt.empty(0) |> .to(device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
     model   = run_episode(envs, model, episode, 0, False, buffer, states)
