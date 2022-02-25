@@ -28,8 +28,8 @@ ace_variant: int     = 0               # ACE Environment variant
 βs: tuple[float]     = (β1, β2) where: # Weight Decay
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
-σ_min: float = -2                      # Lower Clipping
-σ_max: float = 20                      # Upper Clipping
+σ_min: float         = -2              # Lower Clipping
+σ_max: float         = 20              # Upper Clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
 max_time: float      = 20.0            # Maximum time to cut off
 
