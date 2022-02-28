@@ -14,7 +14,7 @@ import hace as ac
 ## Defaults (as args later)
 verbose: bool        = True            # Print verbose debug output
 num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 1000            # How many steps to take
+num_steps: int       = 250             # How many steps to take
 early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 200             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -24,8 +24,10 @@ ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Envir
 ace_variant: int     = 0               # ACE Environment variant
 γ: float             = 0.99            # Discount Factor
 τ_soft: float        = 5e-3            # Avantage Factor
-α: float             = 3e-4            # Learning Rate
-βs: tuple[float]     = (β1, β2) where: # Weight Decay
+α_actor: float       = 2e-4            # Learning Rate for Actor
+α_critic: float      = 1e-4            # Learning Rate for Critic
+α_value: float       = 2e-4            # Learning Rate for Value
+βs: tuple[float]     = (β1, β2) where: # Betas
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
 σ_min: float         = -2              # Lower Clipping
@@ -58,13 +60,15 @@ def write_performance(env: gym.Env, step: int) = performance where:
 ## Replay Buffer
 data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
                  , next_state: pt.Tensor, done: pt.Tensor ):
-    def sample(self, batch_size: int) = smpl where:
-        idx = len(self) |> pt.randperm |> .[:batch_size] |> .tolist()
-        smpl = (m[idx,:] for m in self) |> tuple |*> ReplayBuffer
     def __len__(self) = self.state |> .shape |> .[0] |> int
     def __add__(self, other: ReplayBuffer) = buf where:
         buf = other |> map$(.to(device)) |> zip$(self, ?) \
                     |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
+
+def sample_buffer(buffer: ReplayBuffer, batch_size: int) = smpl where:
+    idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
+    smpl = buffer |> map$(.[idx,:]) |*> ReplayBuffer
+
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -154,9 +158,12 @@ def make_model(act_dim: int, obs_dim: int) = model where:
     value_target  = ValueNet(obs_dim) |> .to(device)
     params        = [value_target, value_online] |> fmap$(.parameters()) |*> zip
     _             = [op |> .data |> tp.data.copy_ for tp,op in params]
-    actor_optim   = pt.optim.Adam(actor_online.parameters(), lr = α, betas = βs)
-    critic_optim  = pt.optim.Adam(critic_online.parameters(), lr = α, betas = βs)
-    value_optim   = pt.optim.Adam(value_online.parameters(), lr = α, betas = βs)
+    actor_optim   = pt.optim.Adam( actor_online.parameters()
+                                 , lr = α_actor, betas = βs )
+    critic_optim  = pt.optim.Adam( critic_online.parameters()
+                                 , lr = α_critic, betas = βs )
+    value_optim   = pt.optim.Adam( value_online.parameters()
+                                 , lr = α_value, betas = βs )
     model         = Model( actor_online, critic_online, value_online, value_target
                          , actor_optim, critic_optim, value_optim
                          , critic_loss, value_loss )
@@ -169,7 +176,7 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
                  , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
                  , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
     states, actions, rewards_, next_states, dones \
-                = buffer.sample(batch_size) |> fmap$(.to(device))
+                = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
     rewards     = rewards_ |> scale_rewards
     v_expected  = model.value_online(states)
     q_expected  = model.critic_online(states, actions)
