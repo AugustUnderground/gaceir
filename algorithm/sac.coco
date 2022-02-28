@@ -134,14 +134,14 @@ data Model( actor_online: pt.nn.Module, critic_online: pt.nn.Module
         σ    = σ_ |> pt.exp
         a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
     def evaluate( self, state: pt.Tensor, ε: float = 1e-6
-                ) = (a, p, z, μ, σ) where:
-        μ,σ_ = state |> self.actor_online
-        σ    = σ_ |> pt.exp
-        n    = pt.distributions.Normal(μ, σ)
-        z    = n.sample()
-        a    = z |> pt.tanh
-        ε_   = pt.log(1 - a.pow(2) + ε)
-        p    = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
+                ) = (a, p, z, μ, log_σ) where:
+        μ,log_σ = state |> self.actor_online
+        σ       = log_σ |> pt.exp
+        n       = pt.distributions.Normal(μ, σ)
+        z       = n.sample()
+        a       = z |> pt.tanh
+        ε_      = pt.log(1 - a.pow(2) + ε)
+        p       = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
 
 def make_model(act_dim: int, obs_dim: int) = model where:
     def init_weights(m: pt.nn.Module, init: float):

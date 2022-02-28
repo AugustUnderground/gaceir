@@ -131,18 +131,18 @@ data Model( actor: pt.nn.Module, critic_1: pt.nn.Module
         _      = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
                                             ) |*> zip |> starmap$(update, ?) |> list
     def act(self, state: pt.Tensor) = a where:
-        μ,σ_ = state |> self.actor
-        σ    = σ_ |> pt.exp
-        a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
+        μ,log_σ = state |> self.actor
+        σ       = log_σ |> pt.exp
+        a       = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
     def evaluate( self, state: pt.Tensor, ε: float = 1e-6
-                ) = (a, p, z, μ, σ) where:
-        μ,σ_ = state |> self.actor
-        σ    = σ_ |> pt.exp
-        n    = pt.distributions.Normal(μ, σ)
-        z    = n.sample()
-        a    = z |> pt.tanh
-        ε_   = pt.log(1 - a.pow(2) + ε)
-        p    = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
+                ) = (a, p, z, μ, log_σ) where:
+        μ,log_σ = state |> self.actor
+        σ       = log_σ |> pt.exp
+        n       = pt.distributions.Normal(μ, σ)
+        z       = n.sample()
+        a       = z |> pt.tanh
+        ε_      = pt.log(1 - a.pow(2) + ε)
+        p       = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
 
 def make_model(act_dim: int, obs_dim: int) = model where:
     def init_weights(m: pt.nn.Module, init: float):
@@ -160,7 +160,7 @@ def make_model(act_dim: int, obs_dim: int) = model where:
     value_target  = ValueNet(obs_dim) |> .to(device)
     params        = [value_target, value_online] |> fmap$(.parameters()) |*> zip
     _             = [op |> .data |> tp.data.copy_ for tp,op in params]
-    actor_op      = pt.optim.Adam( actor.parameters()
+    actor_opt     = pt.optim.Adam( actor.parameters()
                                  , lr = α_actor, betas = βs )
     critic_1_opt  = pt.optim.Adam( critic_1.parameters()
                                  , lr = α_critic, betas = βs )
@@ -168,9 +168,9 @@ def make_model(act_dim: int, obs_dim: int) = model where:
                                  , lr = α_critic, betas = βs )
     value_opt     = pt.optim.Adam( value_online.parameters()
                                  , lr = α_value, betas = βs )
-    model         = Model( actor_online, critic_1, critic_2, value_online
+    model         = Model( actor, critic_1, critic_2, value_online
                          , value_target, actor_opt, critic_1_opt, critic_2_opt
-                         , value_optim, critic_loss, value_loss )
+                         , value_opt, critic_loss, value_loss )
 
 def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
@@ -178,15 +178,16 @@ def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
 ## Update
 def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
                  , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
+                 , γ: float = 0.99 ) = ( v_loss, c1_loss, c2_loss, a_loss) where:
     states, actions, rewards_, next_states, dones \
                 = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
     rewards     = rewards_ |> scale_rewards
+    #rewards     = rewards_
     v_expected  = states |> model.value_online
     q_exp_1     = (states, actions) |*> model.critic_1
     q_exp_2     = (states, actions) |*> model.critic_2
     q_expected  = (q_exp_1, q_exp_2) |*> pt.min
-    new_actions, log_prob, z, μ, σ \
+    new_actions, log_prob, z, μ, log_σ \
                 = states |> model.evaluate
     v_target    = next_states |> model.value_target
     q_next      = (rewards + ( 1 - dones ) * γ * v_target) |> .detach()
@@ -200,7 +201,7 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     l_target    = q_exp_nxt - v_expected
     l_loss      = (log_prob * (log_prob - l_target)) |> .detach() |> .mean()
     μ_loss      = μ |> pt.pow$(?,2) |> pt.mean |> (*)$(μλ,?)
-    σ_loss      = σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
+    σ_loss      = log_σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
     z_loss      = z |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
     a_loss      = l_loss + μ_loss + σ_loss + z_loss
     _           = model.critic_1_opt.zero_grad()
@@ -217,8 +218,15 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     _           = model.actor_opt.step()
     _           = model.soft_sync()
     _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
-    _           = writer.add_scalar("_Loss_Critic", c_loss, epoch)
+    _           = writer.add_scalar("_Loss_Critic_1", c1_loss, epoch)
+    _           = writer.add_scalar("_Loss_Critic_2", c2_loss, epoch)
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
+    if verbose:
+        print(f"\tL Loss: {l_loss}")
+        print(f"\tμ Loss: {μ_loss}")
+        print(f"\tσ Loss: {σ_loss}")
+        print(f"\tz Loss: {z_loss}")
+        print(f"\ta Loss: {a_loss}")
 
 ## Exploration
 def postprocess(observations, keys: dict[str,list[str]]) = states where:
@@ -241,11 +249,11 @@ def postprocess(observations, keys: dict[str,list[str]]) = states where:
 def save_checkpoint(model: Model, checkpoint_file: str) = res where:
     state_dicts = [ model.actor, model.critic_1, model.critic_2
                   , model.value_online, model.value_target, model.actor_opt
-                  , model.critic_1_opt, model.critic_2_opt, model.value_optim 
+                  , model.critic_1_opt, model.critic_2_opt, model.value_opt
                   ] |> fmap$(.state_dict())
     keys        = [ "actor", "critic_1", "critic_2", "value_online"
                   , "value_target", "actor_opt", "critic_1_opt","critic_2_opt"
-                  , "value_optim" ]
+                  , "value_opt" ]
     save_dict   = (keys, state_dicts) |*> zip |> dict
     res         = (save_dict, checkpoint_file) |*> pt.save
 
