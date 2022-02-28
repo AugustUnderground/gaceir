@@ -1,0 +1,291 @@
+import coconut.convenience
+
+import os, time, datetime
+from collections import namedtuple
+from itertools import repeat
+import torch as pt
+from torch.utils.data import TensorDataset, DataLoader
+import torch_optimizer as optim
+from torch.utils.tensorboard import SummaryWriter
+from fastprogress.fastprogress import master_bar, progress_bar
+import gym, gace
+import hace as ac
+
+## Defaults (as args later)
+verbose: bool        = True            # Print verbose debug output
+num_episodes: int    = 666             # Number of episodes to play
+num_steps: int       = 250             # How many steps to take
+early_stop: float    = -500.0          # Early stop criterion
+batch_size: int      = 200             # size of the batches during epoch
+rng_seed: int        = 666             # Random seed for reproducability
+algorithm: str       = "std"           # Name of used algorithm ∈  ./algorithm
+ace_id: str          = "op2"           # ACE Identifier of the Environment
+ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Environment
+ace_variant: int     = 0               # ACE Environment variant
+γ: float             = 0.99            # Discount Factor
+τ_soft: float        = 5e-3            # Avantage Factor
+α_actor: float       = 2e-4            # Learning Rate for Actor
+α_critic: float      = 1e-4            # Learning Rate for Critic
+α_value: float       = 2e-4            # Learning Rate for Value
+βs: tuple[float]     = (β1, β2) where: # Betas
+    β1: float        = 0.9      # 0.9
+    β2: float        = 0.999    # 0.999
+σ_min: float         = -2              # Lower Clipping
+σ_max: float         = 20              # Upper Clipping
+buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
+max_time: float      = 20.0            # Maximum time to cut off
+
+## Setup
+env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
+time_stamp: str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+model_dir: str  = f"./models/{time_stamp}-{env_id}-{algorithm}"
+model_path: str = f"{model_dir}/checkpoint.pt"
+log_dir: str    = f"./runs/{time_stamp}-{env_id}-{algorithm}/"
+os.makedirs(model_dir, exist_ok = True)
+
+## Setup Globals
+device = pt.device("cuda:1") if pt.cuda.is_available() else pt.device("cpu")
+writer = SummaryWriter(log_dir = log_dir, flush_secs = 30)
+_      = rng_seed |> pt.manual_seed
+
+## Utility
+def write_performance(env: gym.Env, step: int) = performance where:
+    target      = env.target
+    performance = env |> .ace |> ac.current_performance
+    for k in target.keys():
+        writer.add_scalars( k, { "performance": performance[k]
+                               , "target": target[k] }
+                          , step )
+
+## Replay Buffer
+data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
+                 , next_state: pt.Tensor, done: pt.Tensor ):
+    def __len__(self) = self.state |> .shape |> .[0] |> int
+    def __add__(self, other: ReplayBuffer) = buf where:
+        buf = other |> map$(.to(device)) |> zip$(self, ?) \
+                    |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
+
+def sample_buffer(buffer: ReplayBuffer, batch_size: int) = smpl where:
+    idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
+    smpl = buffer |> map$(.[idx,:]) |*> ReplayBuffer
+
+
+## Neural Networks
+data HStack() from pt.nn.Module:
+    def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.hstack
+
+data VStack() from pt.nn.Module:
+    def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.vstack
+
+## Value Network
+data ValueNet(obs_dim: int) from pt.nn.Module:
+    def __init__(self, obs_dim: int):
+        super(ValueNet, self).__init__()
+        self.v_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256), pt.nn.ReLU()
+                                     , pt.nn.Linear(256    , 128), pt.nn.ReLU()
+                                     , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
+                                     , pt.nn.Linear(64     , 1)  )
+    def forward(self, state: pt.Tensor) = state |> self.v_net
+
+## Critic Network
+data CriticNet( obs_dim: int, act_dim: int) from pt.nn.Module:
+    def __init__(self, obs_dim: int, act_dim: int):
+        super(CriticNet, self).__init__()
+        dim = obs_dim + act_dim
+        self.c_net = pt.nn.Sequential( HStack()
+                                     , pt.nn.Linear(dim, 256), pt.nn.ReLU()
+                                     , pt.nn.Linear(256, 128), pt.nn.ReLU()
+                                     , pt.nn.Linear(128, 64) , pt.nn.ReLU()
+                                     , pt.nn.Linear(64 , 1)  )
+    def forward(self, state: pt.Tensor, action: pt.Tensor) = (state, action) |> self.c_net
+
+## Actor Network
+data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float = 20.0
+             ) from pt.nn.Module:
+    def __init__(self, obs_dim: int, act_dim: int):
+        super(ActorNet, self).__init__()
+        self.lin_1 = pt.nn.Linear(obs_dim, 256)
+        self.lin_2 = pt.nn.Linear(256    , 128)
+        self.lin_3 = pt.nn.Linear(128    , 64)
+        self.lin_μ = pt.nn.Linear(64     , act_dim)
+        self.lin_σ = pt.nn.Linear(64     , act_dim)
+        self.relu  = pt.nn.functional.relu
+        self.min_σ = σ_min
+        self.max_σ = σ_max
+        self.lin_σ.weight.data.uniform_(-3e-3, 3e-3)
+        self.lin_σ.bias.data.uniform_(-3e-3, 3e-3)
+    def forward(self, state: pt.Tensor) = (μ, σ) where:
+        x = state |> self.lin_1 |> self.relu |> self.lin_2 |> self.relu |> self.lin_3
+        μ = x |> self.lin_μ
+        σ = x |> self.lin_σ |> pt.clamp$(?, self.min_σ, self.max_σ)
+
+data Model( actor: pt.nn.Module, critic_1: pt.nn.Module
+          , critic_2: pt.nn.Module, value_online: pt.nn.Module
+          , value_target: pt.nn.Module, actor_opt: pt.optim.Optimizer
+          , critic_1_opt: pt.optim.Optimizer, critic_2_opt: pt.optim.Optimizer
+          , value_opt: pt.optim.Optimizer, critic_loss, value_loss ):
+    def soft_sync(self, other = None) = self.value_target where:
+        source = other if other else self.value_online
+        target = self.value_target
+        update = (t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_
+        _      = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
+                                            ) |*> zip |> starmap$(update, ?) |> list
+    def act(self, state: pt.Tensor) = a where:
+        μ,σ_ = state |> self.actor
+        σ    = σ_ |> pt.exp
+        a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
+    def evaluate( self, state: pt.Tensor, ε: float = 1e-6
+                ) = (a, p, z, μ, σ) where:
+        μ,σ_ = state |> self.actor
+        σ    = σ_ |> pt.exp
+        n    = pt.distributions.Normal(μ, σ)
+        z    = n.sample()
+        a    = z |> pt.tanh
+        ε_   = pt.log(1 - a.pow(2) + ε)
+        p    = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
+
+def make_model(act_dim: int, obs_dim: int) = model where:
+    def init_weights(m: pt.nn.Module, init: float):
+        if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
+            m.weight.data.uniform_(-init, init)
+            m.bias.data.uniform_(-init, init)
+    critic_loss   = pt.nn.MSELoss()
+    value_loss    = pt.nn.MSELoss()
+    actor         = ActorNet(obs_dim, act_dim)  |> .to(device)
+    critic_1      = CriticNet(obs_dim, act_dim) |> .to(device)
+    critic_2      = CriticNet(obs_dim, act_dim) |> .to(device)
+    value_online  = ValueNet(obs_dim) |> .to(device)
+    _             = [ init_weights$(?,3e-3) |> n.apply
+                      for n in [actor, critic_1, critic_2, value_online] ]
+    value_target  = ValueNet(obs_dim) |> .to(device)
+    params        = [value_target, value_online] |> fmap$(.parameters()) |*> zip
+    _             = [op |> .data |> tp.data.copy_ for tp,op in params]
+    actor_op      = pt.optim.Adam( actor.parameters()
+                                 , lr = α_actor, betas = βs )
+    critic_1_opt  = pt.optim.Adam( critic_1.parameters()
+                                 , lr = α_critic, betas = βs )
+    critic_2_opt  = pt.optim.Adam( critic_2.parameters()
+                                 , lr = α_critic, betas = βs )
+    value_opt     = pt.optim.Adam( value_online.parameters()
+                                 , lr = α_value, betas = βs )
+    model         = Model( actor_online, critic_1, critic_2, value_online
+                         , value_target, actor_opt, critic_1_opt, critic_2_opt
+                         , value_optim, critic_loss, value_loss )
+
+def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
+    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
+
+## Update
+def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
+                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
+                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
+    states, actions, rewards_, next_states, dones \
+                = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
+    rewards     = rewards_ |> scale_rewards
+    v_expected  = states |> model.value_online
+    q_exp_1     = (states, actions) |*> model.critic_1
+    q_exp_2     = (states, actions) |*> model.critic_2
+    q_expected  = (q_exp_1, q_exp_2) |*> pt.min
+    new_actions, log_prob, z, μ, σ \
+                = states |> model.evaluate
+    v_target    = next_states |> model.value_target
+    q_next      = (rewards + ( 1 - dones ) * γ * v_target) |> .detach()
+    c1_loss     = (q_exp_1, q_next) |*> model.critic_loss
+    c2_loss     = (q_exp_2, q_next) |*> model.critic_loss
+    q_exp_1_nxt = (states, new_actions) |*> model.critic_1
+    q_exp_2_nxt = (states, new_actions) |*> model.critic_2
+    q_exp_nxt   = (q_exp_1_nxt, q_exp_2_nxt) |*> pt.min
+    v_next      = (q_exp_nxt - log_prob) |> .detach()
+    v_loss      = (v_expected, v_next) |*> model.value_loss
+    l_target    = q_exp_nxt - v_expected
+    l_loss      = (log_prob * (log_prob - l_target)) |> .detach() |> .mean()
+    μ_loss      = μ |> pt.pow$(?,2) |> pt.mean |> (*)$(μλ,?)
+    σ_loss      = σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
+    z_loss      = z |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
+    a_loss      = l_loss + μ_loss + σ_loss + z_loss
+    _           = model.critic_1_opt.zero_grad()
+    _           = c1_loss.backward()
+    _           = model.critic_1_opt.step()
+    _           = model.critic_2_opt.zero_grad()
+    _           = c2_loss.backward()
+    _           = model.critic_2_opt.step()
+    _           = model.value_opt.zero_grad()
+    _           = v_loss.backward()
+    _           = model.value_opt.step()
+    _           = model.actor_opt.zero_grad()
+    _           = a_loss.backward()
+    _           = model.actor_opt.step()
+    _           = model.soft_sync()
+    _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
+    _           = writer.add_scalar("_Loss_Critic", c_loss, epoch)
+    _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
+
+## Exploration
+def postprocess(observations, keys: dict[str,list[str]]) = states where:
+    pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
+    lf      = (k) -> k in ["ugbw", "cof", "sr_f", "sr_r"] or k.endswith("fug")
+    p_idx   = keys["observations"] |> filter$(pf) \
+                                   |> fmap$(keys["observations"].index) \
+                                   |> list
+    i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
+    idx     = (p_idx + i_idx) |> sorted
+    l_msk   = keys["observations"] |> map$(lf, ?) |> list  |> pt.Tensor |> .to(device)
+    of      = (o) -> (pt.where(o > 0, pt.log10(o), o) * l_msk) + (o * (1 - l_msk))
+    states  = [ obs |> pt.from_numpy |> .to(device) |> of |> .[idx] 
+                for obs in observations ] |> pt.vstack
+    #states  = (pt.log10(states_) *  l_msk) + (states_ * (~l_msk))
+    #states = [ obs |> pt.from_numpy for obs in observations
+    #         ] |> pt.vstack |> .to(device)
+
+## Checkpoint Saving
+def save_checkpoint(model: Model, checkpoint_file: str) = res where:
+    state_dicts = [ model.actor, model.critic_1, model.critic_2
+                  , model.value_online, model.value_target, model.actor_opt
+                  , model.critic_1_opt, model.critic_2_opt, model.value_optim 
+                  ] |> fmap$(.state_dict())
+    keys        = [ "actor", "critic_1", "critic_2", "value_online"
+                  , "value_target", "actor_opt", "critic_1_opt","critic_2_opt"
+                  , "value_optim" ]
+    save_dict   = (keys, state_dicts) |*> zip |> dict
+    res         = (save_dict, checkpoint_file) |*> pt.save
+
+## Training Loop
+def run_episode(_, model, episode, _, True, buffer, _) = model where:
+    total   = buffer.reward |> .sum() |> .item()
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    if verbose:
+        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
+addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states
+                          ) = run_episode( envs, model, episode, iteration_
+                                         , finish_, buffer_, states_ ) where:
+    t0          = time.time()
+    actions     = states |> model.act
+    observations,rewards_,dones_,infos \
+                = actions |> pt.split$(?,1) \
+                          |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
+                          |> list |> envs.step
+    states_     = postprocess(observations, envs.info[0])
+    rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
+    dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
+    buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones) 
+    t1          = time.time()
+    dt          = t1 - t0
+    _           = envs$[0] |> write_performance$(?, iteration)
+    if len(buffer_) > batch_size:
+        soft_q_update(iteration, model, buffer_, batch_size)
+    done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
+    stop_       = (rewards |> pt.mean |> .item()) < early_stop
+    finish_     = done_ or stop_ or (iteration >= num_steps)# or (dt > max_time)
+    iteration_  = iteration + 1
+    if verbose:
+        f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
+    _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
+    _           = save_checkpoint(model, model_path)
+
+## Episode Loop
+def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
+               ) = model where:
+    obs     = envs.reset()
+    states  = postprocess(obs, envs.info[0])
+    buffer  = pt.empty(0) |> .to(device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    model   = run_episode(envs, model, episode, 0, False, buffer, states)
