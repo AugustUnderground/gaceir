@@ -30,8 +30,8 @@ ace_variant: int     = 0               # ACE Environment variant
 βs: tuple[float]     = (β1, β2) where: # Betas
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
-σ_min: float         = -2              # Lower Clipping
-σ_max: float         = 20              # Upper Clipping
+σ_min: float         = -20             # Lower Clipping
+σ_max: float         = 2               # Upper Clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
 max_time: float      = 20.0            # Maximum time to cut off
 
@@ -170,12 +170,12 @@ def make_model(act_dim: int, obs_dim: int) = model where:
 
 def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
-
-## Update
-def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
-                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
-    states, actions, rewards_, next_states, dones \
+    
+    ## Update
+    def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
+                     , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
+                     , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
+        states, actions, rewards_, next_states, dones \
                 = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
     rewards     = rewards_ |> scale_rewards
     v_expected  = model.value_online(states)
