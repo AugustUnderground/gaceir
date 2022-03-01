@@ -95,7 +95,7 @@ def push_per_buffer(buffer: PERBuffer, other: PERBuffer) = buffer_ where:
                         |> zip$(buffer, ?) |> map$(.[:buffer_size] .. pt.cat) \
                         |*> PERBuffer
 
-def sample_per_buffer( buffer: PERBuffer, batch_size: int, β: float = β_per
+def sample_per_buffer( buffer: PERBuffer, batch_size: int, β: float = β_start
                      ) = (samples, i, w) where:
     N       = buffer |> len
     p       = buffer.priority |> pt.squeeze
@@ -104,13 +104,13 @@ def sample_per_buffer( buffer: PERBuffer, batch_size: int, β: float = β_per
     i       = P.multinomial( num_samples = batch_size, replacement = False
                            ) |> pt.arange(0, N)$[] |> .tolist()
     samples = buffer |> map$(.[i]) |*> PERBuffer
-    w_      = (N * P[i]) |> pt.pow$(?, (- β_per))
+    w_      = (N * P[i]) |> pt.pow$(?, (- β))
     w       = w_ / pt.max(w_)
 
 def update_per_buffer( buffer: PERBuffer, idx: list[int], priority: pt.Tensor
                      ) = buffer_ where:
-    prio      = buffer[0] |> pt.squeeze
-    prio[idx] = priority |> pt.squeeze
+    prio      = buffer[0]
+    prio[idx] = priority.reshape(-1,1)
     buffer_   = PERBuffer(prio, *buffer[1:])
 
 def β_by_frame( f_idx: pt.Tensor, β_start: float = 0.4, β_frames: int = 1000
