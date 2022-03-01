@@ -60,3 +60,14 @@ mdl = [run(eps, sac.run_episodes$(model)) for eps in range(sac.num_episodes)] |*
 model: std.Model = std.make_model(act_dim, obs_dim)
 mdl = [run(eps, std.run_episodes$(model)) for eps in range(std.num_episodes)] |*> zip |> tuple
 #mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
+
+
+
+
+
+a = pt.rand(20)
+b = pt.rand(7)
+
+i = pt.randperm(20)[:7]
+
+a[i] = b
