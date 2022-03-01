@@ -30,10 +30,11 @@ ace_variant: int     = 0               # ACE Environment variant
 βs: tuple[float]     = (β1, β2) where: # Betas
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
-σ_min: float         = -2              # Lower Clipping
-σ_max: float         = 20              # Upper Clipping
+σ_min: float         = -20             # Lower Clipping
+σ_max: float         = 2               # Upper Clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
 max_time: float      = 20.0            # Maximum time to cut off
+a: float             = 0.6             # Replay Buffer stuff
 
 ## Setup
 env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
@@ -58,17 +59,66 @@ def write_performance(env: gym.Env, step: int) = performance where:
                           , step )
 
 ## Replay Buffer
-data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
-                 , next_state: pt.Tensor, done: pt.Tensor ):
+#data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
+#                 , next_state: pt.Tensor, done: pt.Tensor ):
+#    def __len__(self) = self.state |> .shape |> .[0] |> int
+#    def __add__(self, other: ReplayBuffer) = buf where:
+#        buf = other |> map$(.to(device)) |> zip$(self, ?) \
+#                    |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
+#def sample_buffer(buffer: ReplayBuffer, batch_size: int) = smpl where:
+#    idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
+#    smpl = buffer |> map$(.[idx,:]) |*> ReplayBuffer
+
+## Prioritized Experience Replay Buffer
+data PERBuffer( priority: pt.Tensor, state: pt.Tensor, action: pt.Tensor
+              , reward: pt.Tensor, next_state: pt.Tensor, done: pt.Tensor ):
     def __len__(self) = self.state |> .shape |> .[0] |> int
-    def __add__(self, other: ReplayBuffer) = buf where:
-        buf = other |> map$(.to(device)) |> zip$(self, ?) \
-                    |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
+    def β_frame( self, idx: int, β_start: float = 0.4, β_frames: int = 1e5 |> int
+               ) = fβ where:
+        fβ = min(1.0, (β_start + idx * (1.0 - β_start) / β_frames))
 
-def sample_buffer(buffer: ReplayBuffer, batch_size: int) = smpl where:
-    idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
-    smpl = buffer |> map$(.[idx,:]) |*> ReplayBuffer
+def make_per_buffer( state: pt.Tensor = pt.empty(0), action: pt.Tensor = pt.empty(0)
+                   , reward: pt.Tensor = pt.empty(0), next_state: pt.Tensor = pt.empty(0)
+                   , done: pt.Tensor = pt.empty(0) ) = buffer where:
+    priority = reward |> pt.ones_like
+    buffer   = (priority, state, action, reward, next_state, done) \
+             |> map$(.to(device)) |*> PERBuffer
 
+def push_per_buffer(buffer: PERBuffer, other: PERBuffer) = buf where:
+    prio = ( other.priority |> pt.ones_like |> .to(device)
+           ) * (if (buffer |> len) > 0 
+                   then buffer.priority |> pt.max
+                   else 1.0)
+    buf_ = other[1:] |> map$(.to(device)) |*> PERBuffer$(prio) \
+                     |> zip$(buffer, ?) |> map$(pt.cat) |*> PERBuffer
+    idx  = buf_.priority |> pt.squeeze |> pt.argsort$(?, descending = True) \
+         |> .[:buffer_size] |> .tolist()
+    buf  = buf_ |> map$(.[idx]) |*> PERBuffer
+
+def update_per_buffer( buffer: PERBuffer, idx: list[int], priority: pt.Tensor
+                     ) = buffer_ where:
+    _, state, action, reward, next_state, done \
+            = map(.[idx], buffer)
+    prio    = priority |> .to(device) |> .reshape(-1,1)
+    buf_    = PERBuffer(prio, state, action, reward, next_state, done)
+    xdi     = filter((i) -> i not in idx, buffer |> len |> range) |> list
+    buf     = buffer |> map$(.[xdi]) |*> PERBuffer
+    fsi     = (buf, buf_) |> map$(pt.squeeze .. .priority) |> tuple |> pt.cat \
+            |> pt.argsort$(?, descending = True) |> .tolist()
+    buffer_ = zip(buf,buf_) |> map$(.[fsi] .. pt.cat) |*> PERBuffer
+
+def sample_per_buffer( buffer: PERBuffer, batch_size: int
+                     , frame: int, α: float = 0.6
+                     ) = (smpl, indices, weights) where:
+    n       = buffer |> len
+    probs   = buffer.priority |> pt.pow$(?, α)
+    p       = probs / pt.sum(probs) |> pt.squeeze
+    indices = p.multinomial( num_samples = batch_size, replacement = False
+                           ) |> pt.arange(0, n)$[] |> .tolist()
+    smpl    = buffer |> map$(.[indices]) |*> PERBuffer
+    β       = buffer.β_frame(frame)
+    w       = pt.pow(n * p[indices], -β)
+    weights = w / pt.max(w)
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -76,28 +126,6 @@ data HStack() from pt.nn.Module:
 
 data VStack() from pt.nn.Module:
     def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.vstack
-
-## Value Network
-data ValueNet(obs_dim: int) from pt.nn.Module:
-    def __init__(self, obs_dim: int):
-        super(ValueNet, self).__init__()
-        self.v_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256), pt.nn.ReLU()
-                                     , pt.nn.Linear(256    , 128), pt.nn.ReLU()
-                                     , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
-                                     , pt.nn.Linear(64     , 1)  )
-    def forward(self, state: pt.Tensor) = state |> self.v_net
-
-## Critic Network
-data CriticNet( obs_dim: int, act_dim: int) from pt.nn.Module:
-    def __init__(self, obs_dim: int, act_dim: int):
-        super(CriticNet, self).__init__()
-        dim = obs_dim + act_dim
-        self.c_net = pt.nn.Sequential( HStack()
-                                     , pt.nn.Linear(dim, 256), pt.nn.ReLU()
-                                     , pt.nn.Linear(256, 128), pt.nn.ReLU()
-                                     , pt.nn.Linear(128, 64) , pt.nn.ReLU()
-                                     , pt.nn.Linear(64 , 1)  )
-    def forward(self, state: pt.Tensor, action: pt.Tensor) = (state, action) |> self.c_net
 
 ## Actor Network
 data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float = 20.0
@@ -119,6 +147,29 @@ data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float =
         μ = x |> self.lin_μ
         σ = x |> self.lin_σ |> pt.clamp$(?, self.min_σ, self.max_σ)
 
+## Critic Network
+data CriticNet( obs_dim: int, act_dim: int) from pt.nn.Module:
+    def __init__(self, obs_dim: int, act_dim: int):
+        super(CriticNet, self).__init__()
+        dim = obs_dim + act_dim
+        self.c_net = pt.nn.Sequential( HStack()
+                                     , pt.nn.Linear(dim, 256), pt.nn.ReLU()
+                                     , pt.nn.Linear(256, 128), pt.nn.ReLU()
+                                     , pt.nn.Linear(128, 64) , pt.nn.ReLU()
+                                     , pt.nn.Linear(64 , 1)  )
+    def forward(self, state: pt.Tensor, action: pt.Tensor) = (state, action) |> self.c_net
+
+## Value Network
+data ValueNet(obs_dim: int) from pt.nn.Module:
+    def __init__(self, obs_dim: int):
+        super(ValueNet, self).__init__()
+        self.v_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256), pt.nn.ReLU()
+                                     , pt.nn.Linear(256    , 128), pt.nn.ReLU()
+                                     , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
+                                     , pt.nn.Linear(64     , 1)  )
+    def forward(self, state: pt.Tensor) = state |> self.v_net
+
+## SAC Model
 data Model( actor: pt.nn.Module, critic_1: pt.nn.Module
           , critic_2: pt.nn.Module, value_online: pt.nn.Module
           , value_target: pt.nn.Module, actor_opt: pt.optim.Optimizer
@@ -149,7 +200,9 @@ def make_model(act_dim: int, obs_dim: int) = model where:
         if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
             m.weight.data.uniform_(-init, init)
             m.bias.data.uniform_(-init, init)
-    critic_loss   = pt.nn.MSELoss()
+    #critic_loss   = pt.nn.MSELoss()
+    critic_loss   = (qe,qt,w) -> (qe - qt) |> pt.pow$(?,2) |> (*)$(?,w) \
+                                           |> pt.mean |> (*)$(0.5,?)
     value_loss    = pt.nn.MSELoss()
     actor         = ActorNet(obs_dim, act_dim)  |> .to(device)
     critic_1      = CriticNet(obs_dim, act_dim) |> .to(device)
@@ -176,23 +229,26 @@ def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
 
 ## Update
-def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
+def soft_q_update( epoch: int, model: Model, buffer: PERBuffer, batch_size: int
                  , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                 , γ: float = 0.99 ) = ( v_loss, c1_loss, c2_loss, a_loss) where:
-    states, actions, rewards_, next_states, dones \
-                = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
+                 , γ: float = 0.99 ) = buffer_ where:
+    buffer_sample, idx, weights \
+                = buffer |> sample_per_buffer$(?,batch_size, epoch)
+    _, states, actions, rewards_, next_states, dones \
+                = buffer_sample |> map$(.to(device))
     rewards     = rewards_ |> scale_rewards
     #rewards     = rewards_
-    v_expected  = states |> model.value_online
-    q_exp_1     = (states, actions) |*> model.critic_1
-    q_exp_2     = (states, actions) |*> model.critic_2
-    q_expected  = (q_exp_1, q_exp_2) |*> pt.min
     new_actions, log_prob, z, μ, log_σ \
                 = states |> model.evaluate
+    q_exp_1     = (states, actions) |*> model.critic_1
+    q_exp_2     = (states, actions) |*> model.critic_2
+    v_expected  = states |> model.value_online
     v_target    = next_states |> model.value_target
     q_next      = (rewards + ( 1 - dones ) * γ * v_target) |> .detach()
-    c1_loss     = (q_exp_1, q_next) |*> model.critic_loss
-    c2_loss     = (q_exp_2, q_next) |*> model.critic_loss
+    #c1_loss     = (q_exp_1, q_next) |*> model.critic_loss
+    #c2_loss     = (q_exp_2, q_next) |*> model.critic_loss
+    c1_loss     = (q_exp_1, q_next, weights) |*> model.critic_loss
+    c2_loss     = (q_exp_2, q_next, weights) |*> model.critic_loss
     q_exp_1_nxt = (states, new_actions) |*> model.critic_1
     q_exp_2_nxt = (states, new_actions) |*> model.critic_2
     q_exp_nxt   = (q_exp_1_nxt, q_exp_2_nxt) |*> pt.min
@@ -200,9 +256,9 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     v_loss      = (v_expected, v_next) |*> model.value_loss
     l_target    = q_exp_nxt - v_expected
     l_loss      = (log_prob * (log_prob - l_target)) |> .detach() |> .mean()
-    μ_loss      = μ |> pt.pow$(?,2) |> pt.mean |> (*)$(μλ,?)
-    σ_loss      = log_σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
-    z_loss      = z |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
+    μ_loss      = μ     |> pt.pow$(?,2)            |> pt.mean |> (*)$(μλ,?)
+    σ_loss      = log_σ |> pt.pow$(?,2)            |> pt.mean |> (*)$(σλ,?)
+    z_loss      = z     |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
     a_loss      = l_loss + μ_loss + σ_loss + z_loss
     _           = model.critic_1_opt.zero_grad()
     _           = c1_loss.backward()
@@ -217,16 +273,14 @@ def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: i
     _           = a_loss.backward()
     _           = model.actor_opt.step()
     _           = model.soft_sync()
+    td_1_err    = (q_next - q_exp_1) |> .detach()
+    td_2_err    = (q_next - q_exp_2) |> .detach()
+    priorities  = (((td_1_err + td_2_err) / 2.0) + 1e-5) |> pt.abs |> pt.squeeze
+    buffer_     = buffer |> update_per_buffer$(?, idx, priorities)
     _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
     _           = writer.add_scalar("_Loss_Critic_1", c1_loss, epoch)
     _           = writer.add_scalar("_Loss_Critic_2", c2_loss, epoch)
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
-    if verbose:
-        print(f"\tL Loss: {l_loss}")
-        print(f"\tμ Loss: {μ_loss}")
-        print(f"\tσ Loss: {σ_loss}")
-        print(f"\tz Loss: {z_loss}")
-        print(f"\ta Loss: {a_loss}")
 
 ## Exploration
 def postprocess(observations, keys: dict[str,list[str]]) = states where:
@@ -258,12 +312,12 @@ def save_checkpoint(model: Model, checkpoint_file: str) = res where:
     res         = (save_dict, checkpoint_file) |*> pt.save
 
 ## Training Loop
-def run_episode(_, model, episode, _, True, buffer, _) = model where:
+def run_episode(_, model, episode, _, True, buffer,_) = model where:
     total   = buffer.reward |> .sum() |> .item()
     _       = writer.add_scalar(f"_Reward_Total", total, episode)
     if verbose:
         f"Episode {episode:03} Finished | Total Reward: {total}" |> print
-addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states
+addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states 
                           ) = run_episode( envs, model, episode, iteration_
                                          , finish_, buffer_, states_ ) where:
     t0          = time.time()
@@ -275,13 +329,15 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
     states_     = postprocess(observations, envs.info[0])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones) 
+    buf         = (states, actions, rewards, states_, dones) \
+                |*> make_per_buffer |> push_per_buffer$(buffer,?)
     t1          = time.time()
     dt          = t1 - t0
     _           = envs$[0] |> write_performance$(?, iteration)
-    if len(buffer_) > batch_size:
-        soft_q_update(iteration, model, buffer_, batch_size)
-    done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
+    buffer_     = (if len(buf) > batch_size
+                      then soft_q_update(iteration, model, buf, batch_size)
+                      else buf)
+    done_       = .item() .. pt.all .. .bool() .. pt.squeeze <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
     finish_     = done_ or stop_ or (iteration >= num_steps)# or (dt > max_time)
     iteration_  = iteration + 1
@@ -295,5 +351,6 @@ def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                ) = model where:
     obs     = envs.reset()
     states  = postprocess(obs, envs.info[0])
-    buffer  = pt.empty(0) |> .to(device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    #buffer  = pt.empty(0) |> .to(device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    buffer  = make_per_buffer()
     model   = run_episode(envs, model, episode, 0, False, buffer, states)
