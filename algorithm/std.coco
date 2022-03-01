@@ -14,6 +14,7 @@ early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 200             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
 max_time: float      = 20.0            # Maximum time to cut off
+scale_reward: bool   = False           # Scale / Normalize Rewards
 
 ## Environment Parameters
 ace_id: str          = "op2"           # ACE Identifier of the Environment
@@ -251,8 +252,8 @@ def soft_q_update( epoch: int, model: Model, buffer: PERBuffer, batch_size: int
                 = buffer |> sample_per_buffer$(?,batch_size, β)
     _, states, actions, rewards_, next_states, dones \
                 = buffer_sample |> map$(.to(device))
-    rewards     = rewards_ |> scale_rewards
-    #rewards     = rewards_
+    rewards     = (if scale_reward then rewards_ |> scale_rewards
+                                   else rewards_)
     new_actions, log_prob, z, μ, log_σ \
                 = states |> model.evaluate
     q_exp_1     = (states, actions) |*> model.critic_1
