@@ -3,8 +3,6 @@ import os, time, datetime
 import torch as pt
 import hace as ac
 import gym, gace
-from hy.core import *
-from hy.core.language import *
 from hy.contrib.pprint import pp
 
 #import algorithm.ppo as ppo
@@ -34,11 +32,15 @@ def run(episode: int, run_fun) = results where:
         results = run_fun(envs, episode)
     except ac.AcePoolCorruptionException as err:
         print(f"Episode {episode} stopped early due to error\n\t{err}\nResetting ...")
-        del envs
         envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
         results = None
     else:
         print(f"Finished Episode {episode}.")
+    if episode in count(0,3):
+        print(f"Restarting Environments after {episode} Episodes.")
+        del envs
+        time.sleep(3.0)
+        envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
 
 ## PPO
 model: ppo.Model = ppo.make_model(act_dim, obs_dim, ppo.act_std)

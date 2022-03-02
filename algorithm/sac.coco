@@ -1,20 +1,16 @@
 import coconut.convenience
 
 import os, time, datetime
-from collections import namedtuple
 from itertools import repeat
 import torch as pt
-from torch.utils.data import TensorDataset, DataLoader
-import torch_optimizer as optim
 from torch.utils.tensorboard import SummaryWriter
-from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
 
 ## Defaults (as args later)
 verbose: bool        = True            # Print verbose debug output
 num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 250             # How many steps to take
+num_steps: int       = 150             # How many steps to take
 early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 200             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -172,9 +168,9 @@ def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
     
     ## Update
-    def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
-                     , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                     , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
+def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
+                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
+                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
         states, actions, rewards_, next_states, dones \
                 = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
     rewards     = rewards_ |> scale_rewards
@@ -252,11 +248,14 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
                           |> list |> envs.step
     states_     = postprocess(observations, envs.info[0])
     rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
+    dones       = dones_   |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones) 
     t1          = time.time()
     dt          = t1 - t0
     _           = envs$[0] |> write_performance$(?, iteration)
+    if verbose and (dones_ |> any):
+        done_idx = [i for i,d in dones_ if d]
+        f"Done with Environments {done_idx}" |> print
     if len(buffer_) > batch_size:
         soft_q_update(iteration, model, buffer_, batch_size)
     done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
