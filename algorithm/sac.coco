@@ -2,34 +2,52 @@ import coconut.convenience
 
 import os, time, datetime
 from itertools import repeat
+from typing import Callable
 import torch as pt
 from torch.utils.tensorboard import SummaryWriter
-import gym, gace
-import hace as ac
+#import gym, gace
+#import hace as ac
 
-## Defaults (as args later)
+## Hyper Parameters
 verbose: bool        = True            # Print verbose debug output
-num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 150             # How many steps to take
-early_stop: float    = -500.0          # Early stop criterion
-batch_size: int      = 200             # size of the batches during epoch
-rng_seed: int        = 666             # Random seed for reproducability
 algorithm: str       = "sac"           # Name of used algorithm ∈  ./algorithm
+num_episodes: int    = 666             # Number of episodes to play
+num_steps: int       = 1               # How many steps to take in env
+num_epochs:int       = 1               # How many gradient update steps
+num_iterations: int  = 5000           # Number of iterations
+early_stop: float    = -500.0          # Early stop criterion
+batch_size: int      = 256             # size of the batches during epoch
+rng_seed: int        = 666             # Random seed for reproducability
+max_time: float      = 20.0            # Maximum time to cut off
+
+## ACE
 ace_id: str          = "op2"           # ACE Identifier of the Environment
 ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Environment
 ace_variant: int     = 0               # ACE Environment variant
+
+## SAC
 γ: float             = 0.99            # Discount Factor
-τ_soft: float        = 5e-3            # Avantage Factor
-α_actor: float       = 2e-4            # Learning Rate for Actor
-α_critic: float      = 1e-4            # Learning Rate for Critic
-α_value: float       = 2e-4            # Learning Rate for Value
+τ_soft: float        = 5e-3            # Smoothing Coefficient
+α_const: float       = 0.036 # 0.2     # Temperature Parameter
+σ_min: float         = -20             # Lower Variance Clipping
+σ_max: float         = 2               # Upper Variance Clipping
+ε_noise: float       = 1e-6            # Noisy action
+reward_scale: float  = 5.0             # Reward Scaling Factor
+
+## PER
+buffer_size: int     = 1e6 |> int      # Maximum size of replay buffer
+α_start: float       = 0.6
+β_start: float       = 0.4
+β_frames: int        = 1e5 |> int
+
+## NN Optimizer
+w_init: float        = 3e-3            # Initial weight limit
+η_π: float           = 3e-4            # Learning Rate for Actor
+η_q: float           = 3e-4            # Learning Rate for Critic
+η_α: float           = 3e-4            # Learning Rate for Critic
 βs: tuple[float]     = (β1, β2) where: # Betas
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
-σ_min: float         = -20             # Lower Clipping
-σ_max: float         = 2               # Upper Clipping
-buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
-max_time: float      = 20.0            # Maximum time to cut off
 
 ## Setup
 env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
@@ -53,224 +71,352 @@ def write_performance(env: gym.Env, step: int) = performance where:
                                , "target": target[k] }
                           , step )
 
+def limits_init(layer) = (-lim, lim) where:
+    fan_in = layer.weight.data |> .size() |> .[0]
+    lim = fan_in ** (-1/2)
+
+def weights_init(layers, limits = None):
+    if limits:
+        for layer in layers:
+            limits |*> layer.weight.data.uniform_
+    else:
+        for layer in layers:
+            layer |> limits_init |*> layer.weight.data.uniform_
+
+#def to_device(a, b) = (a.get_device() |> b.cuda if a.is_cuda else b.cpu())
+
+#def zero_grad(m) = m where:
+#    for p in m.parameters():
+#        p.grad = None
+
+def soft_sync(source: pt.nn.Module, target: pt.nn.Module, τ: float = τ_soft):
+    soften = (sp, tp) -> (tp.data * (1.0 - τ) + sp.data * τ) |> tp.data.copy_
+    (source, target) |> map$(.parameters()) |*> zip |> starmap$(soften) |> list
+
+def hard_sync(source: pt.nn.Module, target: pt.nn.Module):
+    harden = (sp, tp) -> sp.data |> tp.data.copy_
+    [source, target] |> map$(.parameters()) |*> zip |> starmap$(harden) |> list
+
+def uniform_prior(a) = p where:
+    p = a.shape[1] |> pt.zeros$(?, device = device) |> .reshape(-1,1) # |> to_device$(a)
+
+def gaussian_prior(a) = p where:
+    loc = a.shape[1] |> pt.zeros$(?, device = device) #|> to_device$(a)
+    tri = a.shape[1] |> pt.eye$(?, device = device) # |> to_device$(a)
+    p   = pt.distributions.MultivariateNormal(loc = loc, scale_tril = tri) \
+        |> .log_prob(a) |> .reshape(-1,1) # |> to_device$(a)
+
+## Data Processing
+#def postprocess(observations, keys: dict[str,list[str]]) = states where:
+def postprocess(observations) = states where:
+    #pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
+    #lf      = (k) -> k in ["ugbw", "cof", "sr_f", "sr_r"] or k.endswith("fug")
+    #p_idx   = keys["observations"] |> filter$(pf) \
+    #                               |> fmap$(keys["observations"].index) \
+    #                               |> list
+    #i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
+    #idx     = (p_idx + i_idx) |> sorted
+    #l_msk   = keys["observations"] |> map$(lf, ?) |> list  |> pt.Tensor
+    #of      = (o) -> (pt.where(o > 0, pt.log10(o), o) * l_msk) + (o * (1 - l_msk))
+    #states  = [ obs |> pt.from_numpy |> of |> .[idx] 
+    #            for obs in observations ] |> pt.vstack
+    #states  = (pt.log10(states_) *  l_msk) + (states_ * (~l_msk))
+    states = [ obs |> pt.from_numpy for obs in observations
+             ] |> pt.vstack |> .to(device) # |> .cpu()
+
+def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
+    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
+ 
 ## Replay Buffer
 data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
                  , next_state: pt.Tensor, done: pt.Tensor ):
     def __len__(self) = self.state |> .shape |> .[0] |> int
     def __add__(self, other: ReplayBuffer) = buf where:
-        buf = other |> map$(.to(device)) |> zip$(self, ?) \
-                    |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
+        buf = (self, other) |*> zip \
+            |> map$(.[-buffer_size:] .. pt.cat) |*> ReplayBuffer
 
 def sample_buffer(buffer: ReplayBuffer, batch_size: int) = smpl where:
     idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
     smpl = buffer |> map$(.[idx,:]) |*> ReplayBuffer
 
+data PERBuffer( buffer: ReplayBuffer, priorities: pt.Tensor, α: float = α_start
+              ,  β_start: float = β_start, β_frames: int = β_frames ):
+    def __len__(self) = self.buffer |> len
 
-## Neural Networks
-data HStack() from pt.nn.Module:
-    def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.hstack
+def mk_per_buffer( α: float = 0.6,  β_start: float = 0.4, β_frames: int = int(1e5) 
+                 ) = buffer where:
+    buf    = pt.empty(0, device = device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
+    prio   = pt.empty(0, device = device)
+    buffer = PERBuffer(buf, prio, α, β_start, β_frames)
 
-data VStack() from pt.nn.Module:
-    def forward(self, X: tuple[pt.Tensor, pt.Tensor]) = X |> pt.vstack
+def β_by_frame(buffer: PERBuffer, frame_idx: int) = β where:
+    β = ( buffer.β_start + frame_idx * (1.0 - buffer.β_start) / buffer.β_frames
+        ) |> min$(1.0,?)
 
-## Value Network
-data ValueNet(obs_dim: int) from pt.nn.Module:
-    def __init__(self, obs_dim: int):
-        super(ValueNet, self).__init__()
-        self.v_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256), pt.nn.ReLU()
-                                     , pt.nn.Linear(256    , 128), pt.nn.ReLU()
-                                     , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
-                                     , pt.nn.Linear(64     , 1)  )
-    def forward(self, state: pt.Tensor) = state |> self.v_net
+def per_push( pb: PERBuffer,  state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
+            , next_state: pt.Tensor, done: pt.Tensor ) = buffer where:
+    b1, p1, α, β_start, β_frames = pb
+    b2   = (state, action, reward, next_state, done) |*> ReplayBuffer
+    buf  = b1 + b2
+    p    = (if len(b1) > 0 
+               then p1 |> pt.max |> .item() 
+               else pt.tensor(1, device = device))
+    prio = b2.reward |> pt.full_like$(?, p) |> (,)$(p1,?) |> pt.cat |> .[-buffer_size:]
+    buffer = PERBuffer(buf, prio, α, β_start, β_frames)
 
-## Critic Network
-data CriticNet( obs_dim: int, act_dim: int) from pt.nn.Module:
-    def __init__(self, obs_dim: int, act_dim: int):
-        super(CriticNet, self).__init__()
-        dim = obs_dim + act_dim
-        self.c_net = pt.nn.Sequential( HStack()
-                                     , pt.nn.Linear(dim, 256), pt.nn.ReLU()
-                                     , pt.nn.Linear(256, 128), pt.nn.ReLU()
-                                     , pt.nn.Linear(128, 64) , pt.nn.ReLU()
-                                     , pt.nn.Linear(64 , 1)  )
-    def forward(self, state: pt.Tensor, action: pt.Tensor) = (state, action) |> self.c_net
+def per_sample( buffer: PERBuffer, frame_idx: int, batch_size: int = batch_size
+              ) = (s,i,w) where:
+    N = buffer.buffer |> len
+    p = buffer.priorities |> pt.pow$(?, buffer.α) |> .squeeze()
+    P = p / p.sum()
+    i = P.multinomial( num_samples = batch_size, replacement = False
+                     ) |> pt.arange(0, N, device = device)$[]
+    s = pt.index_select$(?,0,i) |> map$(?, buffer.buffer) |*> ReplayBuffer
+    β = β_by_frame(buffer, frame_idx)
+    W = (N * P[i]) |> pt.pow$(?,-β)
+    w = W / W.max()
 
-## Actor Network
-data ActorNet( obs_dim: int, act_dim: int, σ_min: float = -2.0, σ_max: float = 20.0
-             ) from pt.nn.Module:
-    def __init__(self, obs_dim: int, act_dim: int):
-        super(ActorNet, self).__init__()
+def per_update( buffer: PERBuffer, indices: pt.Tensor, priorities: pt.Tensor 
+              ) = buffer_ where:
+    b1, p1, α, β_start, β_frames = buffer
+    p2   = p1 |> pt.index_select$(?, 0, indices) \
+              |> pt.index_add$(p1, 0, indices, ?, alpha = -1) \
+              |> pt.index_add$(?, 0, indices, priorities)
+    buffer_ = PERBuffer(b1, p2, α, β_start, β_frames)
+
+## Actor
+#class Actor(pt.nn.Module)
+data Actor(obs_dim: int, act_dim: int) from pt.nn.Module:
+    def __init__( self, obs_dim: int, act_dim: int
+                , σ_min: float = σ_min, σ_max: float = σ_max ):
+        super(Actor, self).__init__()
+        self.σ_min = σ_min
+        self.σ_max = σ_max
         self.lin_1 = pt.nn.Linear(obs_dim, 256)
-        self.lin_2 = pt.nn.Linear(256    , 128)
-        self.lin_3 = pt.nn.Linear(128    , 64)
-        self.lin_μ = pt.nn.Linear(64     , act_dim)
-        self.lin_σ = pt.nn.Linear(64     , act_dim)
-        self.relu  = pt.nn.functional.relu
-        self.min_σ = σ_min
-        self.max_σ = σ_max
-        self.lin_σ.weight.data.uniform_(-3e-3, 3e-3)
-        self.lin_σ.bias.data.uniform_(-3e-3, 3e-3)
-    def forward(self, state: pt.Tensor) = (μ, σ) where:
-        x = state |> self.lin_1 |> self.relu |> self.lin_2 |> self.relu |> self.lin_3
-        μ = x |> self.lin_μ
-        σ = x |> self.lin_σ |> pt.clamp$(?, self.min_σ, self.max_σ)
+        self.lin_2 = pt.nn.Linear(256    , 256)
+        self.lin_μ = pt.nn.Linear(256    , act_dim)
+        self.lin_σ = pt.nn.Linear(256    , act_dim)
+        self.activ = pt.nn.functional.relu
+        weights_init([self.lin_1, self.lin_2])
+        weights_init([self.lin_μ, self.lin_σ], limits = (-w_init, w_init))
+    def forward(self, state) = (μ, σ) where:
+        s = state |> self.lin_1 |> self.activ |> self.lin_2 |> self.activ
+        μ = s |> self.lin_μ
+        σ = s |> self.lin_σ |> pt.clamp$(?, self.σ_min, self.σ_max)
 
-data Model( actor_online: pt.nn.Module, critic_online: pt.nn.Module
-          , value_online: pt.nn.Module, value_target: pt.nn.Module
-          , actor_optim: pt.optim.Optimizer, critic_optim: pt.optim.Optimizer
-          , value_optim: pt.optim.Optimizer, critic_loss, value_loss  ):
-    def sync_target(self, other = None) = self.value_target where:
-        source = other if other else self.value_online
-        target = self.value_target
-        update = (t, o) -> (t * (1.0 - τ_soft) + o * τ_soft) |> t.copy_
-        _      = [ target, source ] |> fmap$( fmap$(.data) .. list .. .parameters()
-                                            ) |*> zip |> starmap$(update, ?) |> list
-    def act(self, state: pt.Tensor) = a where:
-        μ,σ_ = state |> self.actor_online
-        σ    = σ_ |> pt.exp
-        a    = (μ, σ) |*> pt.distributions.Normal |> .sample() |> pt.tanh |> .detach()
-    def evaluate( self, state: pt.Tensor, ε: float = 1e-6
-                ) = (a, p, z, μ, log_σ) where:
-        μ,log_σ = state |> self.actor_online
-        σ       = log_σ |> pt.exp
-        n       = pt.distributions.Normal(μ, σ)
-        z       = n.sample()
-        a       = z |> pt.tanh
-        ε_      = pt.log(1 - a.pow(2) + ε)
-        p       = n |> .log_prob(z) |> (-)$(?, ε_) |> .sum(-1, keepdim = True)
+## Critic
+data Critic(obs_dim: int, act_dim: int) from pt.nn.Module:
+    def __init__(self, obs_dim: int, act_dim: int):
+        super(Critic, self).__init__()
+        dim           = obs_dim + act_dim
+        self.lin_1 = pt.nn.Linear(dim, 256)
+        self.lin_2 = pt.nn.Linear(256, 256)
+        self.lin_3 = pt.nn.Linear(256, 1)
+        self.activ = pt.nn.functional.relu
+        weights_init([self.lin_1, self.lin_2])
+        weights_init([self.lin_3])
+    def forward(self, state, action) = q where:
+        q = (state, action) |> pt.cat$(?, dim = 1) |> self.lin_1 |> self.activ \
+                            |> self.lin_2 |> self.activ |> self.lin_3
 
-def make_model(act_dim: int, obs_dim: int) = model where:
-    def init_weights(m: pt.nn.Module, init: float):
-        if isinstance(m, pt.nn.Linear) and (m.out_features == 1 or m.out_features == act_dim):
-            m.weight.data.uniform_(-init, init)
-            m.bias.data.uniform_(-init, init)
-    critic_loss   = pt.nn.MSELoss()
-    value_loss    = pt.nn.MSELoss()
-    actor_online  = ActorNet(obs_dim, act_dim)  |> .to(device)
-    critic_online = CriticNet(obs_dim, act_dim) |> .to(device)
-    value_online  = ValueNet(obs_dim) |> .to(device)
-    _             = [ init_weights$(?,3e-3) |> n.apply
-                      for n in [ value_online, critic_online, actor_online ] ]
-    value_target  = ValueNet(obs_dim) |> .to(device)
-    params        = [value_target, value_online] |> fmap$(.parameters()) |*> zip
-    _             = [op |> .data |> tp.data.copy_ for tp,op in params]
-    actor_optim   = pt.optim.Adam( actor_online.parameters()
-                                 , lr = α_actor, betas = βs )
-    critic_optim  = pt.optim.Adam( critic_online.parameters()
-                                 , lr = α_critic, betas = βs )
-    value_optim   = pt.optim.Adam( value_online.parameters()
-                                 , lr = α_value, betas = βs )
-    model         = Model( actor_online, critic_online, value_online, value_target
-                         , actor_optim, critic_optim, value_optim
-                         , critic_loss, value_loss )
+## SAC Agent
+data Agent( π_online: pt.nn.Module, π_optim: pt.optim.Optimizer
+          , q1_online: pt.nn.Module, q1_optim: pt.optim.Optimizer
+          , q2_online: pt.nn.Module, q2_optim: pt.optim.Optimizer
+          , q1_target: pt.nn.Module, q2_target: pt.nn.Module
+          , entropy_target: float, π_prior: Callable
+          , α_log: pt.Tensor, α_optim: pt.optim.Optimizer ):
+    def save_state(self, checkpoint_file: str) = res where:
 
-def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
-    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
-    
-    ## Update
-def soft_q_update( epoch: int, model: Model, buffer: ReplayBuffer, batch_size: int
-                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                 , γ: float = 0.99 ) = (v_loss, c_loss, a_loss) where:
-        states, actions, rewards_, next_states, dones \
-                = buffer |> sample_buffer$(?,batch_size) |> map$(.to(device))
-    rewards     = rewards_ |> scale_rewards
-    v_expected  = model.value_online(states)
-    q_expected  = model.critic_online(states, actions)
-    new_actions, log_prob, z, μ, σ \
-                = model.evaluate(states)
-    v_target    = model.value_target(next_states)
-    q_next      = (rewards + ( 1 - dones ) * γ * v_target) |> .detach()
-    c_loss      = model.critic_loss(q_expected, q_next)
-    q_exp_nxt   = model.critic_online(states, new_actions)
-    v_next      = (q_exp_nxt - log_prob) |> .detach()
-    v_loss      = model.value_loss(v_expected, v_next)
-    l_target   = q_exp_nxt - v_expected
-    l_loss      = (log_prob * (log_prob - l_target)) |> .detach() |> .mean()
-    μ_loss      = μ |> pt.pow$(?,2) |> pt.mean |> (*)$(μλ,?)
-    σ_loss      = σ |> pt.pow$(?,2) |> pt.mean |> (*)$(σλ,?)
-    z_loss      = z |> pt.pow$(?,2) |> .sum(1) |> pt.mean |> (*)$(zλ,?)
-    a_loss      = l_loss + μ_loss + σ_loss + z_loss
-    _           = model.critic_optim.zero_grad()
-    _           = c_loss.backward()
-    _           = model.critic_optim.step()
-    _           = model.value_optim.zero_grad()
-    _           = v_loss.backward()
-    _           = model.value_optim.step()
-    _           = model.actor_optim.zero_grad()
-    _           = a_loss.backward()
-    _           = model.actor_optim.step()
-    _           = model.sync_target()
-    _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
-    _           = writer.add_scalar("_Loss_Critic", c_loss, epoch)
-    _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
+        nets = [ self.π_online, self.q1_online, self.q2_online, self.q1_target
+               , self.q2_target ]
+        opts = [ self.π_optim, self.q1_optim, self.q2_optim , self.α_optim ]
+        tens = [self.α_log]
+        m    = ( nets |> map$(.state_dict() .. .cpu() .. .eval()) |> list
+               ) + ( opts |> map$(.state_dict()) |> list
+               ) + (tens |> map$(.cpu()) |> list)
+        d    = [ "actor_online", "critic_1_online", "critic_2_online"
+               , "critic_1_target", "critic_2_target", "actor_optim"
+               , "critic_1_optim", "critic_2_optim", "alpha_optim", "alpha_log"]
+        res  = (d,m) |*> zip |> dict |> pt.save$(?, checkpoint_file)
+        _    = nets |> map$(.to(device) .. .train()) |> list
+        _    = tens |> map$(.to(device)) |> list
+    def load_state(self):
+        raise(NotImplementedError)
 
-## Exploration
-def postprocess(observations, keys: dict[str,list[str]]) = states where:
-    pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
-    lf      = (k) -> k in ["ugbw", "cof", "sr_f", "sr_r"] or k.endswith("fug")
-    p_idx   = keys["observations"] |> filter$(pf) \
-                                   |> fmap$(keys["observations"].index) \
-                                   |> list
-    i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
-    idx     = (p_idx + i_idx) |> sorted
-    l_msk   = keys["observations"] |> map$(lf, ?) |> list  |> pt.Tensor |> .to(device)
-    of      = (o) -> (pt.where(o > 0, pt.log10(o), o) * l_msk) + (o * (1 - l_msk))
-    states  = [ obs |> pt.from_numpy |> .to(device) |> of |> .[idx] 
-                for obs in observations ] |> pt.vstack
-    #states  = (pt.log10(states_) *  l_msk) + (states_ * (~l_msk))
-    #states = [ obs |> pt.from_numpy for obs in observations
-    #         ] |> pt.vstack |> .to(device)
+def act(agent: Agent, state: pt.Tensor) = a where:
+    μ,σ_log = state |> agent.π_online
+    σ = σ_log |> pt.exp
+    N = pt.distributions.Normal(0, 1)
+    ε = N |> .sample()
+    a = ( μ + σ * ε ) |> pt.tanh |> .detach()
 
-## Checkpoint Saving
-def save_checkpoint(model: Model, checkpoint_file: str) = res where:
-    state_dicts = [ model.actor_online, model.critic_online, model.value_online
-                  , model.value_target, model.actor_optim, model.critic_optim
-                  , model.value_optim ] |> fmap$(.state_dict())
-    keys        = [ "actor_online", "critic_online", "value_online", "value_target"
-                  , "actor_optim", "critic_optim", "value_optim" ]
-    save_dict   = (keys, state_dicts) |*> zip |> dict
-    res         = pt.save(save_dict, checkpoint_file)
+def evaluate( agent: Agent, state: pt.Tensor
+            , ε_n: float = ε_noise) = (a,p) where:
+    μ,σ_log = state |> agent.π_online 
+    σ = σ_log |> pt.exp
+    N = pt.distributions.Normal(0, 1)
+    ε = N |> .sample()
+    a = ( μ + σ * ε ) |> pt.tanh
+    l1 = (μ, σ) |*> pt.distributions.Normal |> .log_prob( μ + σ * ε )
+    l2 = (1 - pt.pow(a, 2) + ε_n) |> pt.log
+    p = l1 - l2
 
-## Training Loop
-def run_episode(_, model, episode, _, True, buffer, _) = model where:
-    total   = buffer.reward |> .sum() |> .item()
-    _       = writer.add_scalar(f"_Reward_Total", total, episode)
-    if verbose:
-        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
-addpattern def run_episode( envs, model, episode, iteration, finish, buffer, states
-                          ) = run_episode( envs, model, episode, iteration_
-                                         , finish_, buffer_, states_ ) where:
+def make_agent( act_dim: int, obs_dim: int, prior: str = "Gaussian"
+              ) = agent where:
+    π_online       = Actor(obs_dim, act_dim)  |> .to(device)
+    q1_online      = Critic(obs_dim, act_dim) |> .to(device)
+    q1_target      = Critic(obs_dim, act_dim) |> .to(device)
+    q2_online      = Critic(obs_dim, act_dim) |> .to(device)
+    q2_target      = Critic(obs_dim, act_dim) |> .to(device)
+    _              = q1_online.state_dict()   |> q1_target.load_state_dict
+    _              = q2_online.state_dict()   |> q2_target.load_state_dict
+    π_optim        = pt.optim.Adam( π_online.parameters()
+                                  , lr = η_π, betas = βs )
+    q1_optim       = pt.optim.Adam( q1_online.parameters()
+                                  , lr = η_q, betas = βs )
+    q2_optim       = pt.optim.Adam( q2_online.parameters()
+                                  , lr = η_q, betas = βs )
+    entropy_target = - act_dim
+    α_log          = pt.tensor([0.0], requires_grad = True, device = device)
+    α_optim        = pt.optim.Adam([α_log], lr = η_α, betas = βs)
+    π_prior        = .to(device) .. (if prior == "Uniform"
+                                        then uniform_prior
+                                        else gaussian_prior)
+    agent          = Agent( π_online, π_optim, q1_online, q1_optim
+                          , q2_online, q2_optim, q1_target, q2_target
+                          , entropy_target, π_prior, α_log, α_optim)
+
+def update_step(iteration, 0, agent, experiences, _, prios, _, _) = prios where:
+    if verbose and (iteration in count(0, 100)):
+        _ = print(f"Finished Updating after {iteration:05} iterations.")
+addpattern def update_step( iteration, epoch, agent, experiences, weights
+                          , prios = None, γ = 0.99, d = 1 
+                          ) = update_step( iteration, epoch_, agent, experiences
+                                         , weights, prios_, γ, d ) where:
+    states, actions, rewards_, next_states, dones = experiences
+    next_actions, next_logprobs_                  = evaluate agent next_states
+    rewards        = rewards_ * reward_scale
+    #rewards       = rewards_ |> scale_rewards
+    next_logprobs  = next_logprobs_ |> pt.mean
+    next_q1_target = (next_states, next_actions) |*> agent.q1_target
+    next_q2_target = (next_states, next_actions) |*> agent.q2_target
+    next_q_target  = (next_q1_target, next_q2_target) |*> pt.min
+    α_             = agent.α_log |> pt.exp
+    q_targets      = rewards \
+                   + (γ * (1 - dones) * (next_q_target - α_ * next_logprobs)) \
+                   |> .detach() |> pt.clone
+    now_q1         = (states, actions) |*> agent.q1_online
+    now_q2         = (states, actions) |*> agent.q2_online
+    td1_error      = q_targets |> (-)$(?,now_q1)
+    td2_error      = q_targets |> (-)$(?,now_q2)
+    q1_loss        = td1_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
+                   |> pt.mean |> (*)$(0.5,?) |> pt.clone
+    q2_loss        = td2_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
+                   |> pt.mean |> (*)$(0.5,?) |> pt.clone
+    _              = agent.q1_optim.zero_grad(set_to_none = True)
+    _              = q1_loss.backward()
+    _              = agent.q1_optim.step()
+    _              = agent.q2_optim.zero_grad(set_to_none = True)
+    _              = q2_loss.backward()
+    _              = agent.q2_optim.step()
+    if iteration in count(0, d):
+        actions_, logprobs_                       = evaluate agent states
+        logprobs   = logprobs_ |> .detach() |> pt.clone
+        α_loss     = - ( agent.α_log * (logprobs + agent.entropy_target)
+                       ) |> pt.mean
+        _          = agent.α_optim.zero_grad(set_to_none = True)
+        _          = α_loss.backward()
+        _          = agent.α_optim.step()
+        α          = agent.α_log |> pt.exp |> .item()
+        π_pl       = agent.π_prior actions_
+        with pt.no_grad():
+            q1_    = agent.q1_online states actions_
+        π_loss     = weights |> .reshape(-1,1) \
+                   |> (*)$((α * logprobs_ - q1_ - π_pl), ?) |> pt.mean
+        _          = agent.π_optim.zero_grad(set_to_none = True)
+        _          = π_loss.backward()
+        _          = agent.π_optim.step()
+        _          = soft_sync(agent.q1_online, agent.q1_target)
+        _          = soft_sync(agent.q2_online, agent.q2_target)
+    td1e,td2e      = (td1_error, td2_error) |> map$(pt.clone .. .detach())
+    prios_         = (0.5 * (td1e + td2e) + 1e-5) |> pt.abs
+    epoch_         = epoch - 1
+    _             = writer.add_scalar("_Loss_Q1", q1_loss, iteration)
+    _             = writer.add_scalar("_Loss_Q2", q2_loss, iteration)
+    _             = writer.add_scalar("_Loss_π", π_loss, iteration)
+    _             = writer.add_scalar("_Loss_α", α_loss, iteration)
+
+def update_policy( iteration: int, agent: Agent, buffer: PERBuffer
+                 , num_epochs: int = num_epochs ) = buffer_ where:
+    experiences, indices, weights = per_sample(buffer, iteration, batch_size)
+    prios = update_step(iteration, num_epochs, agent, experiences, weights)
+    buffer_ = per_update(buffer, indices, prios)
+
+## Evaluate Policy
+def evaluate_step( iteration, 0, _, envs, buffer, states
+                 ) = (buffer, states) where:
+    if verbose and (iteration in count(0, 100)):
+        r = buffer.reward |> pt.mean |> .item()
+        _ = print(f"Finished Evauluating after {iteration:05} iterations with Mean Reward: {r:.3f}")
+addpattern def evaluate_step( iteration, step, agent, envs, buffer, states
+                            ) = evaluate_step( iteration, step_, agent, envs
+                                             , buffer_, states_ )  where:
+    with pt.no_grad():
+        actions = act agent states 
     t0          = time.time()
-    actions     = states |> model.act
     observations,rewards_,dones_,infos \
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    states_     = postprocess(observations, envs.info[0])
-    rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    dones       = dones_   |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones) 
     t1          = time.time()
     dt          = t1 - t0
-    _           = envs$[0] |> write_performance$(?, iteration)
-    if verbose and (dones_ |> any):
-        done_idx = [i for i,d in dones_ if d]
-        f"Done with Environments {done_idx}" |> print
-    if len(buffer_) > batch_size:
-        soft_q_update(iteration, model, buffer_, batch_size)
-    done_       = .item() .. pt.all .. .bool() .. .squeeze() <| dones
-    stop_       = (rewards |> pt.mean |> .item()) < early_stop
-    finish_     = done_ or stop_ or (iteration >= num_steps)# or (dt > max_time)
-    iteration_  = iteration + 1
-    if verbose:
-        f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
+    #states_     = postprocess(observations, envs.info[0])
+    states_     = postprocess observations
+    rewards     = rewards_ |> pt.tensor$(?, device = device, dtype = pt.float) \
+                           |> .reshape(-1,1)
+    dones       = dones_   |> pt.tensor$(?, device = device, dtype = pt.float) \
+                           |> .reshape(-1,1)
+    buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones)
+    step_       = step - 1
     _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
-    _           = save_checkpoint(model, model_path)
+    #_           = envs$[0] |> write_performance$(?, iteration)
 
-## Episode Loop
-def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
-               ) = model where:
-    obs     = envs.reset()
-    states  = postprocess(obs, envs.info[0])
-    buffer  = pt.empty(0) |> .to(device) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
-    model   = run_episode(envs, model, episode, 0, False, buffer, states)
+def evaluate_policy( iteration: int, agent: Agent, envs: gace.envs.vec.VecACE
+                   , buffer: ReplayBuffer, states: pt.Tensor
+                   , num_steps: int = num_steps ) = (buffer_, states_) where:
+    buffer_,states_ = evaluate_step iteration num_steps agent envs buffer states
+
+## Run Loop
+def run_algorithm(episode, iteration, agent, envs, True, buffer, _) = total where:
+    total   = buffer.buffer.reward |> .sum() |> (/)$(?,len(envs)) |> .item()
+    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+    if verbose:
+        f"Episode {episode:03} finished after {iteration:03} iterations| Total Reward: {total}" |> print
+addpattern def run_algorithm( episode, iteration, agent, envs, done, buffer
+                            , states ) = run_algorithm( episode, iteration_
+                                                      , agent, envs, done_
+                                                      , buffer_, states_ 
+                                                      ) where:
+    memories,states_ = evaluate_policy( iteration, agent, envs, buffer.buffer
+                                      , states, num_steps)
+    buffer_ = memories |*> per_push$(buffer) \
+            |> (if len(memories) < batch_size 
+                   then reveal_type 
+                   else update_policy$(iteration, agent, ?, num_epochs))
+    iteration_ = iteration + 1
+    stop       = buffer_ |> .buffer |> .done |> .squeeze() |> .bool() |> pt.any |> .item() |> bool
+    done_      = (stop or (iteration >= num_iterations)) |> bool # or (dt > max_time)
+    _          = model_path |> agent.save_state
+    if verbose and stop:
+        print(f"One or more parallel envs have finished, resetting ...")
+    if verbose and (iteration >= num_iterations):
+        print(f"Reached maximum number of iterations before being done, resetting ...")
+
+def run_episodes( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
+                ) = agent where:
+    obs    = envs.reset()
+    #states = postprocess(obs, envs.info[0])
+    states = postprocess(obs)
+    buffer = mk_per_buffer()
+    agent  = run_algorithm(episode, 0, agent, envs, False, buffer, states)

@@ -11,7 +11,8 @@ verbose: bool        = True            # Print verbose debug output
 scale_reward: bool   = True            # Scale / Normalize Rewards
 reparam_trick: bool  = True            # Use reparametrization
 num_episodes: int    = 666             # Number of episodes to play
-num_steps: int       = 100             # How many steps to take per episode
+num_epochs: int      = 1               # Number of epochs for training
+num_steps: int       = 500             # How many steps to take per episode
 early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 200             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -253,15 +254,14 @@ def postprocess(observations, keys: dict[str,list[str]]) = states where:
 def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
 
+
+
 ## Update
-def soft_q_update( epoch: int, model: Model, buffer: PERBuffer, batch_size: int
-                 , μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
-                 , γ: float = 0.99 ) = buffer_ where:
-    β_per       = epoch |> pt.tensor |> β_by_frame |> .item()
-    buffer_sample, idx, weights \
-                = buffer |> sample_per_buffer$(?, batch_size, β = β_per)
+def update( epoch: int, model: Model, buffer: PERBuffer, weights: pt.Tensor
+          , batch_size: int, μλ: float = 1e-3, σλ: float = 1e-3, zλ: float = 0.0
+          , γ: float = 0.99 ) = priorities where:
     _, states, actions, rewards_, next_states, dones \
-                = buffer_sample |> map$(.to(device))
+                = buffer |> map$(.to(device))
     rewards     = (if scale_reward then rewards_ |> scale_rewards else rewards_)
     new_actions, log_prob, ξ, μ, log_σ \
                 = states |> model.evaluate
@@ -302,11 +302,19 @@ def soft_q_update( epoch: int, model: Model, buffer: PERBuffer, batch_size: int
     td_1_err    = (q_next - q_exp_1) |> .detach()
     td_2_err    = (q_next - q_exp_2) |> .detach()
     priorities  = (((td_1_err + td_2_err) / 2.0) + 1e-5) |> pt.abs |> pt.squeeze
-    buffer_     = buffer |> update_per_buffer$(?, idx, priorities)
     _           = writer.add_scalar("_Loss_Actor", a_loss, epoch)
     _           = writer.add_scalar("_Loss_Critic_1", c1_loss, epoch)
     _           = writer.add_scalar("_Loss_Critic_2", c2_loss, epoch)
     _           = writer.add_scalar("_Loss_Value", v_loss, epoch)
+
+def soft_q_update( iteration: int, epochs: int, model: Model, buffer: PERBuffer
+                 , batch_size: int ) = buffer_ where:
+    β_per       = iteration |> pt.tensor |> β_by_frame |> .item()
+    buffer_sample, idx, weights \
+                = buffer |> sample_per_buffer$(?, batch_size, β = β_per)
+    priorities  = [ update(e, model, buffer_sample, weights, batch_size) 
+                    for e in (epochs |> range) ]
+    buffer_     = buffer |> update_per_buffer$(?, idx, priorities[-1])
 
 ## Exploration and Training Loop
 def run_episode(_, model, episode, _, True, buffer,_) = model where:
@@ -323,26 +331,34 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
                 = actions |> pt.split$(?,1) \
                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
                           |> list |> envs.step
-    states_     = postprocess(observations, envs.info[0])
-    rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
+    #states_     = postprocess(observations, envs.info[0])
+    states_     = observations |> pt.from_numpy |> .to(device)
+    #rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
+    rewards     = (rewards_ * 5.0) |> pt.Tensor |> .to(device) |> .reshape(-1,1)
     dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    if verbose and (dones_ |> any):
-        done_idx = [i for i,d in dones_ if d]
-        f"Done with Environments {done_idx}" |> print
+    #if verbose and (dones_ |> any):
+    if verbose and any(dones_):
+        _ = print(dones_)
+    #    done_idx = [i for i,d in dones_ if d]
+    #    f"Done with Environments {done_idx}" |> print
     new_buffer  = (states, actions, rewards, states_, dones) \
                 |*> make_per_buffer |> push_per_buffer$(buffer,?)
     t1          = time.time()
     dt          = t1 - t0
-    _           = envs$[0] |> write_performance$(?, iteration)
+    #_           = envs$[0] |> write_performance$(?, iteration)
     buffer_     = (if len(new_buffer) > batch_size
-                      then soft_q_update(iteration, model, new_buffer, batch_size)
+                      then soft_q_update(iteration, num_epochs, model, new_buffer, batch_size)
                       else new_buffer)
     done_       = .item() .. pt.all .. .bool() .. pt.squeeze <| dones
     stop_       = (rewards |> pt.mean |> .item()) < early_stop
     finish_     = done_ or stop_ or (iteration >= num_steps)# or (dt > max_time)
     iteration_  = iteration + 1
     if verbose:
-        f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
+        #f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}" |> print
+        #f"Iteration {iteration:03} took {dt:.3f}s | Total Reward: {rewards.sum():.3f}" |> print
+        #f"Iteration {iteration:03} took {dt:.3f}s | Total Reward: {rewards_}" |> print
+        f"Iteration {iteration:03} took {dt:.3f}s | Reward: {rewards}" |> print
+        f"                          | Done: {dones}"                   |> print
     _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
     _           = save_checkpoint(model, model_path)
 
@@ -350,6 +366,7 @@ addpattern def run_episode( envs, model, episode, iteration, finish, buffer, sta
 def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
                ) = model where:
     obs     = envs.reset()
-    states  = postprocess(obs, envs.info[0])
+    #states  = postprocess(obs, envs.info[0])
+    states  = obs |> pt.from_numpy |> .to(device)
     buffer  = make_per_buffer()
     model   = run_episode(envs, model, episode, 0, False, buffer, states)
