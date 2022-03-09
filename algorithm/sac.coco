@@ -14,7 +14,7 @@ algorithm: str       = "sac"           # Name of used algorithm ∈  ./algorithm
 num_episodes: int    = 666             # Number of episodes to play
 num_steps: int       = 1               # How many steps to take in env
 num_epochs:int       = 1               # How many gradient update steps
-num_iterations: int  = 5000           # Number of iterations
+num_iterations: int  = 150             # Number of iterations
 early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 256             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
@@ -28,7 +28,7 @@ ace_variant: int     = 0               # ACE Environment variant
 ## SAC
 γ: float             = 0.99            # Discount Factor
 τ_soft: float        = 5e-3            # Smoothing Coefficient
-α_const: float       = 0.036 # 0.2     # Temperature Parameter
+α_const: float       = 0.2 # 0.036    # Temperature Parameter
 σ_min: float         = -20             # Lower Variance Clipping
 σ_max: float         = 2               # Upper Variance Clipping
 ε_noise: float       = 1e-6            # Noisy action
@@ -83,12 +83,6 @@ def weights_init(layers, limits = None):
         for layer in layers:
             layer |> limits_init |*> layer.weight.data.uniform_
 
-#def to_device(a, b) = (a.get_device() |> b.cuda if a.is_cuda else b.cpu())
-
-#def zero_grad(m) = m where:
-#    for p in m.parameters():
-#        p.grad = None
-
 def soft_sync(source: pt.nn.Module, target: pt.nn.Module, τ: float = τ_soft):
     soften = (sp, tp) -> (tp.data * (1.0 - τ) + sp.data * τ) |> tp.data.copy_
     (source, target) |> map$(.parameters()) |*> zip |> starmap$(soften) |> list
@@ -107,22 +101,29 @@ def gaussian_prior(a) = p where:
         |> .log_prob(a) |> .reshape(-1,1) # |> to_device$(a)
 
 ## Data Processing
-#def postprocess(observations, keys: dict[str,list[str]]) = states where:
-def postprocess(observations) = states where:
-    #pf      = (k) -> ":" not in k and "/" not in k and k[0] |> .islower()
-    #lf      = (k) -> k in ["ugbw", "cof", "sr_f", "sr_r"] or k.endswith("fug")
-    #p_idx   = keys["observations"] |> filter$(pf) \
-    #                               |> fmap$(keys["observations"].index) \
-    #                               |> list
-    #i_idx   = [k |> keys["observations"].index for k in keys["actions"]]
-    #idx     = (p_idx + i_idx) |> sorted
-    #l_msk   = keys["observations"] |> map$(lf, ?) |> list  |> pt.Tensor
-    #of      = (o) -> (pt.where(o > 0, pt.log10(o), o) * l_msk) + (o * (1 - l_msk))
-    #states  = [ obs |> pt.from_numpy |> of |> .[idx] 
-    #            for obs in observations ] |> pt.vstack
-    #states  = (pt.log10(states_) *  l_msk) + (states_ * (~l_msk))
+def process_gym(observations) = states where:
     states = [ obs |> pt.from_numpy for obs in observations
-             ] |> pt.vstack |> .to(device) # |> .cpu()
+             ] |> pt.vstack |> .to(device)
+
+def process_gace(observations, keys: dict[str, [list [str]]]) = states where:
+    ok     = [ k for k in keys['observations'] 
+               if (k[0].islower() or (k in keys['actions'])) 
+                  and ("steps" not in k)
+                  and not k.startswith('vn_')]
+    idx    = [keys['observations'].index(m) for m in ok]
+    idx_i  = [ok.index(i) for i in ok if i.startswith('i') or i.endswith(':id')]
+    fl     = ["ugbw", "cof", "sr_f", "sr_r"]
+    idx_f  = [ ok.index(f) for f in ok 
+               if (not f.startswith('delta_') 
+                   and (filter((f_) -> (f_ in f), fl) |> list |> any)) 
+                  or f.endswith(':fug') ]
+    msk_i  = [ i in idx_i for i in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_f  = [ f in idx_f for f in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    obs    = observations |> map$(pt.from_numpy) |> list |> pt.vstack |> .[:,idx] 
+    states = obs |> pt.where$(msk_f, (obs |> pt.abs |> pt.log), ?) \
+                 |> pt.where$(msk_i, obs * 1e6, ?) |> pt.nan_to_num |> .to(device)
 
 def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
@@ -246,21 +247,21 @@ data Agent( π_online: pt.nn.Module, π_optim: pt.optim.Optimizer
 
 def act(agent: Agent, state: pt.Tensor) = a where:
     μ,σ_log = state |> agent.π_online
-    σ = σ_log |> pt.exp
-    N = pt.distributions.Normal(0, 1)
-    ε = N |> .sample()
-    a = ( μ + σ * ε ) |> pt.tanh |> .detach()
+    σ       = σ_log |> pt.exp
+    N       = pt.distributions.Normal(0, 1)
+    ε       = N |> .sample()
+    a       = ( μ + σ * ε ) |> pt.tanh |> .detach()
 
 def evaluate( agent: Agent, state: pt.Tensor
             , ε_n: float = ε_noise) = (a,p) where:
-    μ,σ_log = state |> agent.π_online 
-    σ = σ_log |> pt.exp
-    N = pt.distributions.Normal(0, 1)
-    ε = N |> .sample()
-    a = ( μ + σ * ε ) |> pt.tanh
-    l1 = (μ, σ) |*> pt.distributions.Normal |> .log_prob( μ + σ * ε )
-    l2 = (1 - pt.pow(a, 2) + ε_n) |> pt.log
-    p = l1 - l2
+    μ,σ_log = state |> agent.π_online
+    σ       = σ_log |> pt.exp
+    N       = pt.distributions.Normal(0, 1)
+    ε       = N |> .sample()
+    a       = ( μ + σ * ε ) |> pt.tanh
+    l1      = (μ, σ) |*> pt.distributions.Normal |> .log_prob( μ + σ * ε )
+    l2      = (1 - pt.pow(a, 2) + ε_n) |> pt.log
+    p       = l1 - l2
 
 def make_agent( act_dim: int, obs_dim: int, prior: str = "Gaussian"
               ) = agent where:
@@ -288,7 +289,7 @@ def make_agent( act_dim: int, obs_dim: int, prior: str = "Gaussian"
                           , entropy_target, π_prior, α_log, α_optim)
 
 def update_step(iteration, 0, agent, experiences, _, prios, _, _) = prios where:
-    if verbose and (iteration in count(0, 100)):
+    if verbose and (iteration in count(0, 10)):
         _ = print(f"Finished Updating after {iteration:05} iterations.")
 addpattern def update_step( iteration, epoch, agent, experiences, weights
                           , prios = None, γ = 0.99, d = 1 
@@ -297,7 +298,7 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
     states, actions, rewards_, next_states, dones = experiences
     next_actions, next_logprobs_                  = evaluate agent next_states
     rewards        = rewards_ * reward_scale
-    #rewards       = rewards_ |> scale_rewards
+    #rewards        = rewards_ |> scale_rewards
     next_logprobs  = next_logprobs_ |> pt.mean
     next_q1_target = (next_states, next_actions) |*> agent.q1_target
     next_q2_target = (next_states, next_actions) |*> agent.q2_target
@@ -339,13 +340,12 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
         _          = agent.π_optim.step()
         _          = soft_sync(agent.q1_online, agent.q1_target)
         _          = soft_sync(agent.q2_online, agent.q2_target)
-    td1e,td2e      = (td1_error, td2_error) |> map$(pt.clone .. .detach())
-    prios_         = (0.5 * (td1e + td2e) + 1e-5) |> pt.abs
+        _          = writer.add_scalar("_Loss_π", π_loss, iteration)
+        _          = writer.add_scalar("_Loss_α", α_loss, iteration)
+    prios_         = (0.5 * (td1_error + td2_error) + 1e-5) |> pt.abs |> .detach()
     epoch_         = epoch - 1
-    _             = writer.add_scalar("_Loss_Q1", q1_loss, iteration)
-    _             = writer.add_scalar("_Loss_Q2", q2_loss, iteration)
-    _             = writer.add_scalar("_Loss_π", π_loss, iteration)
-    _             = writer.add_scalar("_Loss_α", α_loss, iteration)
+    _              = writer.add_scalar("_Loss_Q1", q1_loss, iteration)
+    _              = writer.add_scalar("_Loss_Q2", q2_loss, iteration)
 
 def update_policy( iteration: int, agent: Agent, buffer: PERBuffer
                  , num_epochs: int = num_epochs ) = buffer_ where:
@@ -354,14 +354,15 @@ def update_policy( iteration: int, agent: Agent, buffer: PERBuffer
     buffer_ = per_update(buffer, indices, prios)
 
 ## Evaluate Policy
-def evaluate_step( iteration, 0, _, envs, buffer, states
-                 ) = (buffer, states) where:
-    if verbose and (iteration in count(0, 100)):
-        r = buffer.reward |> pt.mean |> .item()
-        _ = print(f"Finished Evauluating after {iteration:05} iterations with Mean Reward: {r:.3f}")
-addpattern def evaluate_step( iteration, step, agent, envs, buffer, states
+def evaluate_step( iteration, 0, _, envs, buffer, states, iter_total
+                 ) = (buffer, states, iter_total) where:
+    if verbose and (iteration in count(0, 10)):
+        r = iter_total |> pt.sum$(?, dim = 0) |> pt.mean |> .item()
+        _ = print(f"Finished Evauluating after {iteration:05} iterations with Total Reward: {r:.3f}")
+addpattern def evaluate_step( iteration, step, agent, envs, buffer, states, iter_total
                             ) = evaluate_step( iteration, step_, agent, envs
-                                             , buffer_, states_ )  where:
+                                             , buffer_, states_ , iter_total_
+                                             )  where:
     with pt.no_grad():
         actions = act agent states 
     t0          = time.time()
@@ -371,52 +372,66 @@ addpattern def evaluate_step( iteration, step, agent, envs, buffer, states
                           |> list |> envs.step
     t1          = time.time()
     dt          = t1 - t0
-    #states_     = postprocess(observations, envs.info[0])
-    states_     = postprocess observations
+    keys       = envs.info[0]
+    states_     = process_gace observations keys
+    #states_     = process_gym observations
     rewards     = rewards_ |> pt.tensor$(?, device = device, dtype = pt.float) \
                            |> .reshape(-1,1)
     dones       = dones_   |> pt.tensor$(?, device = device, dtype = pt.float) \
                            |> .reshape(-1,1)
     buffer_     = buffer + ReplayBuffer(states, actions, rewards, states_, dones)
     step_       = step - 1
-    _           = writer.add_scalar("_Reward_Mean", rewards.mean(), iteration)
-    #_           = envs$[0] |> write_performance$(?, iteration)
+    iter_total_ = rewards_ |> pt.tensor |> .reshape(1,-1) |> (,)$(iter_total,?) |> pt.cat
+    _           = writer.add_scalar("_Reward_Mean", rewards |> pt.mean, iteration)
+    _           = envs$[0] |> write_performance$(?, iteration)
 
 def evaluate_policy( iteration: int, agent: Agent, envs: gace.envs.vec.VecACE
                    , buffer: ReplayBuffer, states: pt.Tensor
-                   , num_steps: int = num_steps ) = (buffer_, states_) where:
-    buffer_,states_ = evaluate_step iteration num_steps agent envs buffer states
+                   , num_steps: int = num_steps 
+                   ) = (buffer_, states_, reward_) where:
+    reward                  = pt.empty(0)
+    buffer_,states_,reward_ = evaluate_step( iteration, num_steps, agent, envs
+                                           , buffer, states, reward )
 
 ## Run Loop
-def run_algorithm(episode, iteration, agent, envs, True, buffer, _) = total where:
-    total   = buffer.buffer.reward |> .sum() |> (/)$(?,len(envs)) |> .item()
-    _       = writer.add_scalar(f"_Reward_Total", total, episode)
+def run_algorithm( episode, iteration, agent, envs, True, buffer, _, reward
+                 ) = reward where:
+    tm = reward |> pt.sum$(?, dim = 0) |> pt.mean |> .item()
+    _  = writer.add_scalar(f"_Reward_Total_Mean", tm, episode)
+    ti = reward |> pt.sum$(?, dim = 0) |> pt.min  |> .item()
+    _  = writer.add_scalar(f"_Reward_Total_Min",  ti, episode)
+    ta = reward |> pt.sum$(?, dim = 0) |> pt.max  |> .item()
+    _  = writer.add_scalar(f"_Reward_Total_Max",  ta, episode)
     if verbose:
-        f"Episode {episode:03} finished after {iteration:03} iterations| Total Reward: {total}" |> print
+        print(f"Episode {episode:03} done after {iteration:05} iterations with Min Reward: {ti}")
+    _  = model_path |> agent.save_state
 addpattern def run_algorithm( episode, iteration, agent, envs, done, buffer
-                            , states ) = run_algorithm( episode, iteration_
-                                                      , agent, envs, done_
-                                                      , buffer_, states_ 
-                                                      ) where:
-    memories,states_ = evaluate_policy( iteration, agent, envs, buffer.buffer
-                                      , states, num_steps)
-    buffer_ = memories |*> per_push$(buffer) \
-            |> (if len(memories) < batch_size 
-                   then reveal_type 
-                   else update_policy$(iteration, agent, ?, num_epochs))
+                            , states, reward 
+                            ) = run_algorithm( episode, iteration_, agent, envs
+                                             , done_, buffer_, states_, reward_
+                                             ) where:
+    memories,_states,eval_reward \
+               = evaluate_policy( iteration, agent, envs, buffer.buffer, states
+                                , num_steps )
+    reward_    = pt.cat((reward, eval_reward))
+    buffer_    = memories |*> per_push$(buffer) \
+               |> (if len(memories) < batch_size
+                      then reveal_type 
+                      else update_policy$(iteration, agent, ?, num_epochs))
     iteration_ = iteration + 1
-    stop       = buffer_ |> .buffer |> .done |> .squeeze() |> .bool() |> pt.any |> .item() |> bool
-    done_      = (stop or (iteration >= num_iterations)) |> bool # or (dt > max_time)
+    dones      = - (envs.num_envs * num_steps) |> int |> slice$(?, None) \
+               |> memories.done$[] |> pt.squeeze |> .to(pt.bool) |> .tolist()
+    states_    = if any(dones) then envs.reset(done_mask = dones) else _states
+    #states_    = if any(dones) then envs.reset() else _states
+    done_      = (iteration >= num_iterations) or all(dones)
     _          = model_path |> agent.save_state
-    if verbose and stop:
-        print(f"One or more parallel envs have finished, resetting ...")
-    if verbose and (iteration >= num_iterations):
-        print(f"Reached maximum number of iterations before being done, resetting ...")
 
 def run_episodes( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
                 ) = agent where:
     obs    = envs.reset()
-    #states = postprocess(obs, envs.info[0])
-    states = postprocess(obs)
+    keys   = envs.info[0]
+    states = process_gace obs keys
+    #states = process_gym obs
     buffer = mk_per_buffer()
-    agent  = run_algorithm(episode, 0, agent, envs, False, buffer, states)
+    reward = pt.empty(0)
+    total  = run_algorithm(episode, 0, agent, envs, False, buffer, states, reward)
