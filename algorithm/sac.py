@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# __coconut_hash__ = 0xafaeef1c
+# __coconut_hash__ = 0xd72b8bf7
 
 # Compiled with Coconut version 2.0.0-a_dev33 [How Not to Be Seen]
 
@@ -1166,8 +1166,9 @@ from itertools import repeat  #4 (line num in coconut source)
 from typing import Callable  #5 (line num in coconut source)
 import torch as pt  #6 (line num in coconut source)
 from torch.utils.tensorboard import SummaryWriter  #7 (line num in coconut source)
-#import gym, gace
-#import hace as ac
+import gym  #8 (line num in coconut source)
+import gace  #8 (line num in coconut source)
+import hace as ac  #9 (line num in coconut source)
 
 ## Hyper Parameters
 verbose: bool = True  # Print verbose debug output  #12 (line num in coconut source)
@@ -1258,14 +1259,14 @@ def hard_sync(source: pt.nn.Module, target: pt.nn.Module):  #90 (line num in coc
 
 
 def uniform_prior(a):  #94 (line num in coconut source)
-    p = ((_coconut_partial(pt.zeros, {}, 1, device=device))(a.shape[1])).reshape(-1, 1)  # |> to_device$(a)  #95 (line num in coconut source)
+    p = (_coconut_partial(pt.zeros, {}, 1, device=device))(a.shape[1])  #|> .reshape(-1,1)  #95 (line num in coconut source)
 
     return p  #97 (line num in coconut source)
 
 def gaussian_prior(a):  #97 (line num in coconut source)
-    loc = (_coconut_partial(pt.zeros, {}, 1, device=device))(a.shape[1])  #|> to_device$(a)  #98 (line num in coconut source)
-    tri = (_coconut_partial(pt.eye, {}, 1, device=device))(a.shape[1])  # |> to_device$(a)  #99 (line num in coconut source)
-    p = ((pt.distributions.MultivariateNormal(loc=loc, scale_tril=tri)).log_prob(a)).reshape(-1, 1)  # |> to_device$(a)  #100 (line num in coconut source)
+    loc = (_coconut_partial(pt.zeros, {}, 1, device=device))(a.shape[1])  #98 (line num in coconut source)
+    tri = (_coconut_partial(pt.eye, {}, 1, device=device))(a.shape[1])  #99 (line num in coconut source)
+    p = ((pt.distributions.MultivariateNormal(loc=loc, scale_tril=tri)).log_prob(a)).reshape(-1, 1)  #100 (line num in coconut source)
 
 ## Data Processing
     return p  #104 (line num in coconut source)
@@ -1476,7 +1477,7 @@ def evaluate(agent: Agent, state: pt.Tensor, ε_n: float=ε_noise):  #255 (line 
 
     return (a, p)  #266 (line num in coconut source)
 
-def make_agent(act_dim: int, obs_dim: int, prior: str="Gaussian"):  #266 (line num in coconut source)
+def make_agent(act_dim: int, obs_dim: int, prior: str="Uniform"):  #266 (line num in coconut source)
     π_online = (Actor(obs_dim, act_dim)).to(device)  #268 (line num in coconut source)
     q1_online = (Critic(obs_dim, act_dim)).to(device)  #269 (line num in coconut source)
     q1_target = (Critic(obs_dim, act_dim)).to(device)  #270 (line num in coconut source)
@@ -1866,18 +1867,21 @@ def run_algorithm(*_coconut_match_args, **_coconut_match_kwargs):  #408 (line nu
     dones = (((pt.squeeze)((_coconut.functools.partial(_coconut_iter_getitem, memories.done))((_coconut_partial(slice, {1: None}, 2))((int)(-(envs.num_envs * num_steps)))))).to(pt.bool)).tolist()  #422 (line num in coconut source)
     states_ = envs.reset(done_mask=dones) if any(dones) else _states  #424 (line num in coconut source)
 #states_    = if any(dones) then envs.reset() else _states
-    done_ = (iteration >= num_iterations) or all(dones)  #426 (line num in coconut source)
-    _ = (agent.save_state)(model_path)  #427 (line num in coconut source)
+    if verbose and any(dones):  #426 (line num in coconut source)
+        de = [i for i, d in enumerate(dones) if d]  #427 (line num in coconut source)
+        _ = print(f"Environments {de} are done!")  #428 (line num in coconut source)
+    done_ = (iteration >= num_iterations) or all(dones)  #429 (line num in coconut source)
+    _ = (agent.save_state)(model_path)  #430 (line num in coconut source)
 
-    return _coconut_tail_call(run_algorithm, episode, iteration_, agent, envs, done_, buffer_, states_, reward_)  #429 (line num in coconut source)
+    return _coconut_tail_call(run_algorithm, episode, iteration_, agent, envs, done_, buffer_, states_, reward_)  #432 (line num in coconut source)
 
-def run_episodes(agent: Agent, envs: gace.envs.vec.VecACE, episode: int):  #429 (line num in coconut source)
-    obs = envs.reset()  #431 (line num in coconut source)
-    keys = envs.info[0]  #432 (line num in coconut source)
-    states = process_gace(obs, keys)  #433 (line num in coconut source)
+def run_episodes(agent: Agent, envs: gace.envs.vec.VecACE, episode: int):  #432 (line num in coconut source)
+    obs = envs.reset()  #434 (line num in coconut source)
+    keys = envs.info[0]  #435 (line num in coconut source)
+    states = process_gace(obs, keys)  #436 (line num in coconut source)
 #states = process_gym obs
-    buffer = mk_per_buffer()  #435 (line num in coconut source)
-    reward = pt.empty(0)  #436 (line num in coconut source)
-    total = run_algorithm(episode, 0, agent, envs, False, buffer, states, reward)  #437 (line num in coconut source)
+    buffer = mk_per_buffer()  #438 (line num in coconut source)
+    reward = pt.empty(0)  #439 (line num in coconut source)
+    total = run_algorithm(episode, 0, agent, envs, False, buffer, states, reward)  #440 (line num in coconut source)
 
-    return agent  #438 (line num in coconut source)
+    return agent  #441 (line num in coconut source)

@@ -5,8 +5,8 @@ from itertools import repeat
 from typing import Callable
 import torch as pt
 from torch.utils.tensorboard import SummaryWriter
-#import gym, gace
-#import hace as ac
+import gym, gace
+import hace as ac
 
 ## Hyper Parameters
 verbose: bool        = True            # Print verbose debug output
@@ -39,10 +39,11 @@ buffer_size: int     = 1e6 |> int      # Maximum size of replay buffer
 α_start: float       = 0.6
 β_start: float       = 0.4
 β_frames: int        = 1e5 |> int
+δ: float             = 1e-5            # Priority update factor
 
 ## NN Optimizer
 w_init: float        = 3e-3            # Initial weight limit
-η_π: float           = 3e-4            # Learning Rate for Actor
+η_π: float           = 1e-4            # Learning Rate for Actor
 η_q: float           = 3e-4            # Learning Rate for Critic
 η_α: float           = 3e-4            # Learning Rate for Critic
 βs: tuple[float]     = (β1, β2) where: # Betas
@@ -92,13 +93,13 @@ def hard_sync(source: pt.nn.Module, target: pt.nn.Module):
     [source, target] |> map$(.parameters()) |*> zip |> starmap$(harden) |> list
 
 def uniform_prior(a) = p where:
-    p = a.shape[1] |> pt.zeros$(?, device = device) |> .reshape(-1,1) # |> to_device$(a)
+    p = a.shape[1] |> pt.zeros$(?, device = device) #|> .reshape(-1,1)
 
 def gaussian_prior(a) = p where:
-    loc = a.shape[1] |> pt.zeros$(?, device = device) #|> to_device$(a)
-    tri = a.shape[1] |> pt.eye$(?, device = device) # |> to_device$(a)
+    loc = a.shape[1] |> pt.zeros$(?, device = device)
+    tri = a.shape[1] |> pt.eye$(?, device = device)
     p   = pt.distributions.MultivariateNormal(loc = loc, scale_tril = tri) \
-        |> .log_prob(a) |> .reshape(-1,1) # |> to_device$(a)
+        |> .log_prob(a) |> .reshape(-1,1)
 
 ## Data Processing
 def process_gym(observations) = states where:
@@ -263,7 +264,7 @@ def evaluate( agent: Agent, state: pt.Tensor
     l2      = (1 - pt.pow(a, 2) + ε_n) |> pt.log
     p       = l1 - l2
 
-def make_agent( act_dim: int, obs_dim: int, prior: str = "Gaussian"
+def make_agent( act_dim: int, obs_dim: int, prior: str = "Uniform"
               ) = agent where:
     π_online       = Actor(obs_dim, act_dim)  |> .to(device)
     q1_online      = Critic(obs_dim, act_dim) |> .to(device)
@@ -330,11 +331,15 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
         _          = α_loss.backward()
         _          = agent.α_optim.step()
         α          = agent.α_log |> pt.exp |> .item()
-        π_pl       = agent.π_prior actions_
+        w          = weights |> .reshape(-1,1)
+        #π_pl       = agent.π_prior actions_
         with pt.no_grad():
             q1_    = agent.q1_online states actions_
-        π_loss     = weights |> .reshape(-1,1) \
-                   |> (*)$((α * logprobs_ - q1_ - π_pl), ?) |> pt.mean
+            q2_    = agent.q2_online states actions_
+            q_     = pt.min(q1_, q2_)
+        #π_loss     = weights |> .reshape(-1,1) \
+        #           |> (*)$((α * logprobs_ - q1_ - π_pl), ?) |> pt.mean
+        π_loss     = (((α * logprobs_) - q_) * w) |> pt.mean
         _          = agent.π_optim.zero_grad(set_to_none = True)
         _          = π_loss.backward()
         _          = agent.π_optim.step()
@@ -342,7 +347,7 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
         _          = soft_sync(agent.q2_online, agent.q2_target)
         _          = writer.add_scalar("_Loss_π", π_loss, iteration)
         _          = writer.add_scalar("_Loss_α", α_loss, iteration)
-    prios_         = (0.5 * (td1_error + td2_error) + 1e-5) |> pt.abs |> .detach()
+    prios_         = (0.5 * (td1_error + td2_error) + δ) |> pt.abs |> .detach()
     epoch_         = epoch - 1
     _              = writer.add_scalar("_Loss_Q1", q1_loss, iteration)
     _              = writer.add_scalar("_Loss_Q2", q2_loss, iteration)
@@ -423,6 +428,9 @@ addpattern def run_algorithm( episode, iteration, agent, envs, done, buffer
                |> memories.done$[] |> pt.squeeze |> .to(pt.bool) |> .tolist()
     states_    = if any(dones) then envs.reset(done_mask = dones) else _states
     #states_    = if any(dones) then envs.reset() else _states
+    if verbose and any(dones):
+        de     = [i for i,d in enumerate(dones) if d]
+        _      = print(f"Environments {de} are done!")
     done_      = (iteration >= num_iterations) or all(dones)
     _          = model_path |> agent.save_state
 
