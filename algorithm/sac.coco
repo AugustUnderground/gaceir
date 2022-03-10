@@ -298,24 +298,30 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
                                          , weights, prios_, γ, d ) where:
     states, actions, rewards_, next_states, dones = experiences
     next_actions, next_logprobs_                  = evaluate agent next_states
-    rewards        = rewards_ * reward_scale
+    α_             = agent.α_log |> pt.exp
+    w              = weights |> .reshape(-1,1)
+    #rewards        = rewards_ * reward_scale
     #rewards        = rewards_ |> scale_rewards
+    rewards        = rewards_
     next_logprobs  = next_logprobs_ |> pt.mean
     next_q1_target = (next_states, next_actions) |*> agent.q1_target
     next_q2_target = (next_states, next_actions) |*> agent.q2_target
     next_q_target  = (next_q1_target, next_q2_target) |*> pt.min
-    α_             = agent.α_log |> pt.exp
     q_targets      = rewards \
                    + (γ * (1 - dones) * (next_q_target - α_ * next_logprobs)) \
                    |> .detach() |> pt.clone
     now_q1         = (states, actions) |*> agent.q1_online
     now_q2         = (states, actions) |*> agent.q2_online
-    td1_error      = q_targets |> (-)$(?,now_q1)
-    td2_error      = q_targets |> (-)$(?,now_q2)
-    q1_loss        = td1_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
-                   |> pt.mean |> (*)$(0.5,?) |> pt.clone
-    q2_loss        = td2_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
-                   |> pt.mean |> (*)$(0.5,?) |> pt.clone
+    td1_error      = pt.pow(q_targets - now_q1, 2) * w
+    td2_error      = pt.pow(q_targets - now_q2, 2) * w
+    q1_loss        = td1_error |> pt.mean |> pt.clone
+    q2_loss        = td2_error |> pt.mean |> pt.clone
+    #td1_error      = q_targets |> (-)$(?,now_q1)
+    #td2_error      = q_targets |> (-)$(?,now_q2)
+    #q1_loss        = td1_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
+    #               |> pt.mean |> (*)$(0.5,?) |> pt.clone
+    #q2_loss        = td2_error |> pt.pow$(?, 2) |> (*)$(?, weights) \
+    #               |> pt.mean |> (*)$(0.5,?) |> pt.clone
     _              = agent.q1_optim.zero_grad(set_to_none = True)
     _              = q1_loss.backward()
     _              = agent.q1_optim.step()
@@ -331,14 +337,12 @@ addpattern def update_step( iteration, epoch, agent, experiences, weights
         _          = α_loss.backward()
         _          = agent.α_optim.step()
         α          = agent.α_log |> pt.exp |> .item()
-        w          = weights |> .reshape(-1,1)
         #π_pl       = agent.π_prior actions_
         with pt.no_grad():
             q1_    = agent.q1_online states actions_
             q2_    = agent.q2_online states actions_
             q_     = pt.min(q1_, q2_)
-        #π_loss     = weights |> .reshape(-1,1) \
-        #           |> (*)$((α * logprobs_ - q1_ - π_pl), ?) |> pt.mean
+        #π_loss     = ((α * logprobs_ - q1_ - π_pl) *  w) |> pt.mean
         π_loss     = (((α * logprobs_) - q_) * w) |> pt.mean
         _          = agent.π_optim.zero_grad(set_to_none = True)
         _          = π_loss.backward()
