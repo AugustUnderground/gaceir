@@ -6,32 +6,35 @@ import torch as pt
 from torch.utils.data import TensorDataset, DataLoader
 import torch_optimizer as optim
 from torch.utils.tensorboard import SummaryWriter
-from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
 
-## Defaults (as args later)
-verbose: bool     = True            # Print verbose debug output
-num_episodes: int = 666             # Number of episodes to play
-num_steps: int    = 5               # How many steps to take -> num_steps × num_envs = n_points ∈  data_set
-num_epochs: int   = 50              # How many time steps to update policy
-max_iter: int     = 100             # Maximum number of iterations during episode
-early_stop: float = -50.0           # Early stop criterion
-batch_size: int   = 10              # size of the batches during epoch
-act_std: float    = 0.25            # standard deviation action distribution
-rng_seed: int     = 666             # Random seed for reproducability
-algorithm: str    = "ppo"           # Name of used algorithm ∈  ./algorithm
-ace_id: str       = "op2"           # ACE Identifier of the Environment
-ace_backend: str  = "xh035"         # PDK/Technology backend of the ACE Environment
-ace_variant: int  = 0               # ACE Environment variant
-ε: float          = 0.2             # Factor for clipping
-η: float          = 0.001           # Factor in loss function
-γ: float          = 0.99            # Discount Factor
-τ: float          = 0.95            # Avantage Factor
-α: float          = 1e-3            # Learning Rate
-βs: tuple[float]  = (β1, β2) where: # Weight Decay
-    β1: float     = 0.9
-    β2: float     = 0.999
+## Defaults
+algorithm: str      = "ppo"           # Name of used algorithm ∈  ./algorithm
+verbose: bool       = True            # Print verbose debug output
+num_episodes: int   = 666             # Number of episodes to play
+num_steps: int      = 13              # num_steps × num_envs = n_points ∈  data_set
+num_epochs: int     = 20              # How many time steps to update policy
+num_iterations: int = 150             # Maximum number of iterations during episode
+early_stop: float   = -500.0          # Early stop criterion
+batch_size: int     = 64              # size of the batches during epoch
+rng_seed: int       = 666             # Random seed for reproducability
+reward_scale: float = 5.0
+
+## GACE Settings
+ace_id: str         = "op2"           # ACE Identifier of the Environment
+ace_backend: str    = "xh035"         # PDK/Technology backend of the ACE Environment
+ace_variant: int    = 0               # ACE Environment variant
+
+## Hyper Parameters
+ε: float            = 0.2             # Factor for clipping
+δ: float            = 0.001           # Factor in loss function
+γ: float            = 0.99            # Discount Factor
+τ: float            = 0.95            # Avantage Factor
+η: float            = 1e-3            # Learning Rate
+βs: tuple[float]    = (β1, β2) where: # Betas
+    β1: float       = 0.9
+    β2: float       = 0.999
 
 ## Setup
 env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
@@ -55,10 +58,52 @@ def write_performance(env: gym.Env, iteration: int) = performance where:
                                , f"Target": target[k] }
                           , iteration)
 
+def weights_init(layer):
+    if type(layer) == pt.nn.Linear:
+        pt.nn.init.normal_(layer.weight, mean = 0, std = 0.1)
+        pt.nn.init.constant_(layer.bias, 0.1)
+
+## Data Processing
+def process_gym(observations) = states where:
+    states = [ obs |> pt.from_numpy for obs in observations
+             ] |> pt.vstack |> .to(device)
+
+def process_gace(observations, keys: dict[str, [list [str]]]) = states where:
+    fl     = ["ugbw", "cof", "sr_f", "sr_r"]
+    ok     = [ k for k in keys['observations'] 
+               if (k[0].islower() or (k in keys['actions'])) 
+                  and ("max-steps" not in k)
+                  and not k.startswith('vn_')]
+    idx    = [keys['observations'].index(m) for m in ok]
+    idx_i  = [ok.index(i) for i in ok if i.startswith('i') or i.endswith(':id')]
+    idx_v  = [ok.index(v) for v in ok if v.startswith('voff_')]
+    idx_f  = [ ok.index(f) for f in ok 
+               if (not f.startswith('delta_') 
+                   and (filter((f_) -> (f_ in f), fl) |> list |> any)) 
+                  or f.endswith(':fug') ]
+    msk_i  = [ i in idx_i for i in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_v  = [ v in idx_v for v in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_f  = [ f in idx_f for f in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    obs    = observations |> map$(pt.from_numpy) |> list |> pt.vstack |> .[:,idx] 
+    obs_   = obs |> pt.where$(msk_f, (obs |> pt.abs |> pt.log10), ?) \
+                 |> pt.where$(msk_i, obs * 1e6, ?)
+                 #|> pt.where$(msk_v, obs * 1e6, ?)  \
+    states = obs_ |> pt.nan_to_num$(?, nan = 0.0, posinf = 0.0, neginf = 0.0) \
+                  |> .to(device)
+
+def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
+    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
+
 ## Memory
 data Memory( states: pt.Tensor, actions: pt.Tensor, logprobs: pt.Tensor
            , rewards: pt.Tensor, values: pt.Tensor, masks: pt.Tensor ):
     def __add__(self, other) = (self, other) |*> zip |> fmap$(pt.cat) |*> Memory
+
+def empty_memory() = memory where:
+    memory = pt.empty(0, device = device) |> repeat |> .$[:6] |*> Memory 
 
 def data_loader(memory: Memory, batch_size: int = batch_size) = loader where:
     states,actions,logprobs,rewards,values,masks \
@@ -70,81 +115,45 @@ def data_loader(memory: Memory, batch_size: int = batch_size) = loader where:
                |*> TensorDataset \
                |> DataLoader$(?, batch_size = batch_size, shuffle = True)
 
-## Neural Networks for actor and critic
+## Neural Networks
 def act_net(obs_dim: int, act_dim: int) = net where:
-    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512)    , pt.nn.ReLU()
-                          , pt.nn.Linear(512    , 256)    , pt.nn.ReLU()
-                          , pt.nn.Linear(256    , 128)    , pt.nn.ReLU()
-                          , pt.nn.Linear(128    , 64)     , pt.nn.ReLU()
-                          , pt.nn.Linear(64     , act_dim), pt.nn.Tanh() )
+    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256)    , pt.nn.ReLU()
+                          , pt.nn.Linear(256    , 256)    , pt.nn.ReLU()
+                          , pt.nn.Linear(256    , act_dim), pt.nn.Tanh() )
 
 def crt_net(obs_dim: int) = net where:
-    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 512), pt.nn.ReLU()
-                          , pt.nn.Linear(512    , 256), pt.nn.ReLU()
-                          , pt.nn.Linear(256    , 128), pt.nn.ReLU()
-                          , pt.nn.Linear(128    , 64) , pt.nn.ReLU()
-                          , pt.nn.Linear(64     , 1)  )
+    net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 256), pt.nn.ReLU()
+                          , pt.nn.Linear(256    , 256), pt.nn.ReLU()
+                          , pt.nn.Linear(256    , 1) )
 
-data Model( actor: pt.nn.Module, critic: pt.nn.Module
-          , optim: pt.optim.Optimizer, std: float ):
-    def eval_mode(self) = self where:
-        [self.actor, self.critic] |> fmap$(.to(device) .. .eval())
-    def train_mode(self) = self where:
-        [self.actor, self.critic] |> fmap$(.to(device) .. .train())
-    def act_cont( self, states: pt.Tensor) = (π, v) where:
-        μ = states |> self.actor
-        σ = μ |> .shape |> .[1] |> pt.eye |> (*)$(?,self.std) |> .to(device)
-        π = pt.distributions.MultivariateNormal(μ, σ)
-        v = states |> self.critic |> .squeeze()
-    def act_disc(self, states: pt.Tensor) = (π, v) where:
-        μ = states |> self.actor
-        π = μ |> pt.distributions.Categorical
-        v = states |> self.critic |> .squeeze()
+## PPO Agent
+data Agent( actor: pt.nn.Module, critic: pt.nn.Module
+          , log_std: pt.nn.Parameter, optim: pt.optim.Optimizer ):
+    def save_state(self, checkpoint_file: str) = res where:
+        state_dicts = [ self.actor, self.critic, self.optim
+                      ] |> fmap$(.state_dict())
+        state_keys  = ["actor", "critic", "optim"]
+        save_dict   = (state_keys, state_dicts) |*> zip |> dict 
+        res         = pt.save save_dict checkpoint_file
+    def load_state(self):
+        raise(NotImplementedError)
 
-def make_model(act_dim: int, obs_dim: int, std: float) = model where:
-    actor: pt.nn.Module       = act_net(obs_dim, act_dim) |> .to(device)
-    critic: pt.nn.Module      = crt_net(obs_dim)          |> .to(device)
-    policy: pt.nn.ModuleList  = pt.nn.ModuleList([actor, critic])
-    optim: pt.optim.Optimizer = pt.optim.Adam(policy.parameters(), lr = α, betas = βs)
-    model: Model              = Model(actor, critic, optim, std)
+def act(agent: Agent, states: pt.Tensor) = (π, v) where:
+    v = states |> agent.critic |> .squeeze()
+    μ = agent.actor states 
+    σ = agent.log_std |> pt.exp |> .expand_as(μ)
+    π = pt.distributions.Normal(μ, σ)
 
-def update_policy( model: Model, states: pt.Tensor, actions: pt.Tensor
-                 , logprobs: pt.Tensor, returns:pt.Tensor, advantages: pt.Tensor 
-                 ) = losses where:
-    dist,values = states |> model.act_cont
-    entropy     = dist |> .entropy() |> .mean()
-    logprobs_   = actions |> dist.log_prob
-    ratios      = (logprobs_ - logprobs) |> pt.exp
-    surr_1      = ratios * advantages
-    surr_2      = pt.clamp(ratios, 1.0 - ε, 1.0 + ε) * advantages
-    loss_act    = (surr_1, surr_2) |*> pt.min |> (-)
-    loss_crt    = (returns - values) |> pt.pow$(?,2) |> pt.mean
-    losses      = 0.5 * loss_crt + loss_act - η * entropy
-    _           = model.optim       |> .zero_grad()
-    _           = losses |> pt.mean |> .backward()
-    _           = model.optim       |> .step()
-
-## Exploration
-def postprocess(observations, keys: [str]) = states where:
-    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
-                          , ?) |> map$((p) -> p |> key.index) |> list
-            for key in keys ] 
-    states = [ o[i] for o,i in zip(observations, idx)
-             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
-
-def trajectories( model: Model, envs: gace.envs.vec.VecACE
-                , states: pt.Tensor ) = (memories, next_states) where:
-    dist,values = states |> model.act_cont
-    actions     = dist |> .sample() |> .detach()
-    logprobs    = actions |> dist.log_prob
-    observations,rewards_,dones,infos \
-                = actions |> pt.split$(?,1) \
-                          |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
-                          |> list |> envs.step
-    next_states = postprocess(observations, [i["output-parameters"] for i in infos])
-    masks       = dones |> pt.Tensor |> .to(device) |> (-)$(1,?)
-    rewards     = rewards_ |> pt.Tensor |> .to(device)
-    memories    = Memory(states,actions,logprobs,rewards,values,masks)
+def make_agent(act_dim: int, obs_dim: int) = agent where:
+    actor   = act_net(obs_dim, act_dim) |> .to(device)
+    critic  = crt_net(obs_dim)          |> .to(device)
+    _       = actor.apply  weights_init
+    _       = critic.apply weights_init
+    log_std = pt.zeros(1, act_dim, device = device, requires_grad = True)
+    params  = ([actor, critic] |> map$(list .. .parameters()) |> reduce$((+))
+              ) + [log_std]
+    optim   = pt.optim.Adam(params, lr = η, betas = βs)
+    agent   = Agent actor critic log_std optim
 
 ## Generalized Advantage Estimate
 def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
@@ -152,69 +161,108 @@ def gae( r: pt.Tensor, v: pt.Tensor, m: pt.Tensor, v_: pt.Tensor
     δ = r + γ * v_ * m - v
     l = δ |> .shape |> .[0] |> range |> reversed
     i = pt.Tensor([0]).to(device)
-    g = reduce( (g_,i_) -> δ[i_] + γ * τ * m[i_] * g_[0] |> (,)$(?,g_) |> pt.hstack
-              , l, i ) |> .[:-1]
+    θ = (g_,i_) -> δ[i_] + γ * τ * m[i_] * g_[0] |> (,)$(?,g_) |> pt.hstack
+    g = reduce(θ, l, i) |> .[:-1]
     a = v + g
 
-## Checkpoint Saving
-def save_checkpoint( model: Model, checkpoint_file: str) = res where:
-    state_dicts = [model.actor, model.critic, model.optim] |> fmap$(.state_dict())
-    state_keys  = ["actor", "critic", "optim"]
-    save_dict   = (state_keys, state_dicts) |*> zip |> dict 
-    res         = pt.save(save_dict, checkpoint_file)
+## Update Policy
+def update_step( iteration: int, agent: Agent, states: pt.Tensor
+               , actions: pt.Tensor, logprobs: pt.Tensor, returns: pt.Tensor
+               , advantages: pt.Tensor ) = losses |> .detach() where:
+    dist,values = act agent states
+    entropy     = dist |> .entropy() |> .mean()
+    logprobs_   = dist.log_prob actions 
+    adv         = advantages |> .reshape(-1,1)
+    ratios      = (logprobs_ - logprobs) |> pt.exp
+    surr_1      = ratios * adv
+    surr_2      = pt.clamp(ratios, 1.0 - ε, 1.0 + ε) * adv
+    loss_act    = (surr_1, surr_2) |*> pt.min |> (-)
+    loss_crt    = (returns - values) |> pt.pow$(?,2) |> pt.mean
+    losses      = 0.5 * loss_crt + loss_act - δ * entropy
+    _           = agent.optim       |> .zero_grad()
+    _           = losses |> pt.mean |> .backward()
+    _           = agent.optim       |> .step()
 
-## Training
-def traject(model, envs, (memories,states), step) = (memories_, states_) where:
-    t0             = time.time()
-    memory,states_ = trajectories(model, envs, states)
-    memories_      = memory + memories
-    t1             = time.time()
+def update_policy(iteration, 0, _, _, losses) = losses  |> .detach() |> pt.mean
+addpattern def update_policy( iteration, epoch, agent, loader, losses
+                            ) = update_policy( iteration, epoch_, agent, loader
+                                             , losses_ ) where:
+    loss    = starmap( update_step$(iteration, agent), loader
+                     ) |> list |> pt.cat |> pt.mean |> .[None]
+    losses_ = (losses, loss) |> pt.cat
+    epoch_  = epoch - 1
+    _       = writer.add_scalar("_Loss_Mean", loss.item(), iteration)
+
+## Evaluate Policy
+def evaluate_step(iteration, 0, _, _, states, memories) = (memories, states)
+addpattern def evaluate_step( iteration, step, agent, envs, states, memories
+                            ) = evaluate_step( iteration, step_, agent, envs
+                                             , states_, memories_ ) where:
+    with pt.no_grad():
+        dist,values  = act agent states
+        actions      = dist |> .sample() |> .detach() |> pt.clamp$(?,-1.0, 1.0)
+        logprobs     = dist.log_prob actions 
+    observations_,rewards_,dones_,infos \
+                 = actions |> pt.split$(?,1) \
+                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
+                           |> list |> envs.step
+    if verbose and any(dones_):
+        de       = [i for i,d in enumerate(dones_) if d]
+        _        = print(f"Environments {de} done in step {step}.")
+    observations = (if any(dones_) 
+                       then envs.reset(done_mask = dones_) 
+                       else observations_)
+    keys         = infos[0]
+    states_      = process_gace observations keys
+    masks        = 1 - (pt.tensor(dones_, device = device, dtype = pt.int))
+    rewards      = pt.tensor(rewards_, device = device)
+    memory       = Memory states actions logprobs rewards values masks
+    memories_    = memories + memory
+    step_        = step - 1
+    _            = writer.add_scalar("_Reward_Mean_Step", rewards.mean(), step)
+
+def evaluate_policy( iteration, agent, envs, states
+                   ) = (memories_, states_) where:
+    memories          = empty_memory()
+    t0                = time.time()
+    memories_,states_ = evaluate_step iteration num_steps agent envs states memories
+    t1                = time.time()
+    r                 = memories_.rewards |> pt.mean
+    dt                = t1 - t0
     if verbose:
-        r = memory.rewards.mean()
-        print(f"Step {step:03} took {(t1 - t0):.3f}s | Average Reward: {r:.3f}")
-    writer.add_scalar("_Reward_Mean", memory.rewards.mean(), step)
+        print(f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {r:.3f}")
+    _                 = writer.add_scalar("_Reward_Mean", r, iteration)
+    _                 = envs$[0] |> write_performance$(?, iteration)
 
-def train(model, epoch, loader) = loss |> pt.mean where:
-    t0   = time.time()
-    loss = starmap(update_policy$(model), loader) |> list |> pt.cat
-    t1   = time.time()
-    writer.add_scalar("_Loss_Mean", loss.mean().item(), epoch)
-
-def run_episode(_, model, episode, _, _, True, loss, reward) = model where:
+## Run PPO Algorithm
+def run_algorithm(_, agent, episode, _, _, True, loss, reward) = agent where:
     total   = reward |> .sum() |> .item()
     _       = writer.add_scalar(f"_Reward_Total", total, episode)
     _       = writer.add_scalar("_Loss_Sum", loss.sum().item(), episode)
     if verbose:
-        f"Episode {episode:03} Finished | Total Reward: {total}" |> print
-addpattern def run_episode(envs, model, episode, iteration, states, _, loss, reward
-                          ) = run_episode( envs, model, episode, iteration_
-                                         , next_states, done, loss_, reward_ 
-                                         ) where:
-    _          = model.eval_mode()
+        print(f"Episode {episode:03} Finished | Total Reward: {total}")
+addpattern def run_algorithm( envs, agent, episode, iteration, states
+                            , _, loss, reward
+                            ) = run_algorithm( envs, agent, episode, iteration_
+                                             , states_, done, loss_, reward_ 
+                                             ) where:
     with pt.no_grad(): 
-        memories_,next_states \
-               = reduce( traject$(model, envs), range(num_steps)
-                       , ( pt.empty(0) |> .to(device) |> repeat |> .$[:6] |*> Memory
-                         , states ))
-    _          = envs |> .gace_envs |> .[0] |> write_performance$(?, iteration )
-    _          = model.train_mode()
-    loader     = data_loader(memories_)
-    losses     = [ train(model, epoch, loader) for epoch in num_epochs |> range 
-                 ] |> pt.stack  |> .detach()
-    done_      = .item() .. pt.all .. .bool() <| (1 - memories_.masks)
-    stop_      = (memories_.rewards |> pt.mean |> .item()) < early_stop
-    done       = done_ or stop_ or (iteration >= max_iter)
-    loss_      = pt.cat((loss, losses))
-    reward_    = pt.cat((reward, memories_.rewards))
-    iteration_ = iteration + 1
-    _          = save_checkpoint(model, model_path)
-    if verbose:
-        r = memories_.rewards.mean().item()
-        print(f"Iteration {iteration:03} | Average Reward {r:.3f}")
+        memories_, states_ \
+               = evaluate_policy iteration agent envs states
 
-def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
-                ) = model where:
-    obs     = envs.reset()
-    states  = postprocess(obs, envs.info[0]["output-parameters"])
-    l = r = pt.empty(0) |> .to(device = device)
-    losses,rewards = run_episode(envs, model, episode, 0, states, False, l, r)
+    loader     = data_loader memories_ batch_size
+    losses     = pt.empty(0, device = device)
+    losses_    = update_policy iteration num_epochs agent loader losses
+    done       = iteration >= num_iterations
+    loss_      = (loss, losses) |> pt.cat
+    reward_    = (reward, memories_.rewards) |> pt.cat
+    iteration_ = iteration + 1
+    _          = agent.save_state model_path
+
+def run_episode( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
+               ) = agent where:
+    obs            = envs.reset()
+    keys           = envs.info[0]
+    states         = process_gace obs keys
+    l = r          = pt.empty(0) |> .to(device = device)
+    losses,rewards = run_algorithm(envs, agent, episode, 0, states, False, l, r)

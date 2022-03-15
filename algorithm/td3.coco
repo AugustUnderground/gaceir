@@ -1,42 +1,43 @@
 import coconut.convenience
 
 import os, time, datetime
-from collections import namedtuple
 from itertools import repeat
 import torch as pt
-from torch.utils.data import TensorDataset, DataLoader
 import torch_optimizer as optim
 from torch.utils.tensorboard import SummaryWriter
-from fastprogress.fastprogress import master_bar, progress_bar
 import gym, gace
 import hace as ac
 
-## Defaults (as args later)
+## Defaults
+algorithm: str       = "td3"           # Name of used algorithm ∈  ./algorithm
 verbose: bool        = True            # Print verbose debug output
 num_episodes: int    = 42              # Number of episodes to play
-num_steps: int       = 2               # How many steps to take
-num_iters: int       = 100             # Iterations per Epoch
+num_steps: int       = 1               # How many steps to take
+num_iterations: int  = 150             # Iterations per Epoch
 num_epochs: int      = 100             # How many time steps to update policy
-early_stop: float    = -50.0           # Early stop criterion
+early_stop: float    = -500.0          # Early stop criterion
 batch_size: int      = 100             # size of the batches during epoch
-act_std: float       = 0.25            # standard deviation action distribution
 rng_seed: int        = 666             # Random seed for reproducability
-algorithm: str       = "td3"           # Name of used algorithm ∈  ./algorithm
+
+## GACE Settings
 ace_id: str          = "op2"           # ACE Identifier of the Environment
 ace_backend: str     = "xh035"         # PDK/Technology backend of the ACE Environment
 ace_variant: int     = 0               # ACE Environment variant
+
+## Hyper Parameters
+update_interval: int = 2               # Update every n epochs
 γ: float             = 0.99            # Discount Factor
 τ_soft: float        = 1e-2            # Avantage Factor
-α: float             = 1e-4            # Learning Rate
+η: float             = 1e-4            # Learning Rate
 βs: tuple[float]     = (β1, β2) where: # Weight Decay
     β1: float        = 0.9
     β2: float        = 0.999
-exp_noise: float     = 0.15            # Exploration Noise
-pol_noise: float     = 0.2             # Noise added to replay actions
-clp_noise: float     = 0.5             # Noise clipping
-update_interval: int = 2               # Update every n epochs
+σ_expl: float        = 0.1             # Noise added to replay actions
+σ_smpl: float        = 0.2             # Noise added to replay actions
+c: float             = 0.5             # Noise clipping
 buffer_size: int     = 1e7 |> int      # Maximum size of replay buffer
-warmup_periode: int  = 100             # Collect experience during warmup
+warmup_periode: int  = 50              # Collect experience during warmup
+d: int               = 2               # Number of updates
 
 ## Setup
 env_id: str     = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
@@ -60,17 +61,59 @@ def write_performance(env: gym.Env, step: int) = performance where:
                                , "target": target[k] }
                           , step )
 
+## Data Processing
+def process_gym(observations) = states where:
+    states = [ obs |> pt.from_numpy for obs in observations
+             ] |> pt.vstack |> .to(device)
+
+def process_gace(observations, keys: dict[str, [list [str]]]) = states where:
+    fl     = ["ugbw", "cof", "sr_f", "sr_r"]
+    ok     = [ k for k in keys['observations'] 
+               if (k[0].islower() or (k in keys['actions'])) 
+                  and ("max-steps" not in k)
+                  and not k.startswith('vn_')]
+    idx    = [keys['observations'].index(m) for m in ok]
+    idx_i  = [ok.index(i) for i in ok if i.startswith('i') or i.endswith(':id')]
+    idx_v  = [ok.index(v) for v in ok if v.startswith('voff_')]
+    idx_f  = [ ok.index(f) for f in ok 
+               if (not f.startswith('delta_') 
+                   and (filter((f_) -> (f_ in f), fl) |> list |> any)) 
+                  or f.endswith(':fug') ]
+    msk_i  = [ i in idx_i for i in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_v  = [ v in idx_v for v in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_f  = [ f in idx_f for f in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
+    obs    = observations |> map$(pt.from_numpy) |> list |> pt.vstack |> .[:,idx] 
+    obs_   = obs |> pt.where$(msk_f, (obs |> pt.abs |> pt.log10), ?) \
+                 |> pt.where$(msk_i, obs * 1e6, ?)
+                 #|> pt.where$(msk_v, obs * 1e6, ?)  \
+    states = obs_ |> pt.nan_to_num$(?, nan = 0.0, posinf = 0.0, neginf = 0.0) \
+                  |> .to(device)
+
+def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
+    scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
+
 ## Replay Buffer
 data ReplayBuffer( state: pt.Tensor, action: pt.Tensor, reward: pt.Tensor
                  , next_state: pt.Tensor, done: pt.Tensor ):
-    def push(self, other) = new where:
-        new = (if len(self.state) <= 0 
-                  then other |*> ReplayBuffer |> fmap$(.[-buffer_size:])
-                  else zip(self,other) |> fmap$(.[-buffer_size:] .. pt.vstack) |*> ReplayBuffer)
-    def sample(self, batch_size: int) = smpl where:
-        idx = self.state |> .shape |> .[0] |> pt.randperm |> .[:batch_size] |> .tolist()
-        smpl = (e[idx,:] for e in self) |*> ReplayBuffer
-    def size(self) = self.state |> .shape |> .[0] |> float
+    def __len__(self) = self.state |> .shape |> .[0] |> int
+
+def empty_buffer() = buffer where:
+    buffer = pt.empty(0, device = device) |> repeat |> .$[:5] |*> ReplayBuffer
+
+def push(buffer, other) = new where:
+    new = (if len(buffer.state) <= 0 
+              then other |> map$(.to(device) .. .[-buffer_size:])
+                         |*> ReplayBuffer
+              else zip(buffer,other) 
+                   |> map$(.to(device) .. .[-buffer_size:] .. pt.vstack)
+                   |*> ReplayBuffer)
+
+def sample(buffer, batch_size: int) = smpl where:
+    idx = buffer |> len |> pt.randperm |> .[:batch_size] |> .tolist()
+    smpl = (b[idx,:] for b in buffer) |*> ReplayBuffer
 
 ## Neural Networks
 data HStack() from pt.nn.Module:
@@ -83,39 +126,33 @@ data VStack() from pt.nn.Module:
 def critic_net(obs_dim: int, act_dim: int) = crt_net where:
     dim = obs_dim + act_dim
     crt_net = pt.nn.Sequential( HStack()
-                              , pt.nn.Linear(dim, 256), pt.nn.ReLU()
-                              , pt.nn.Linear(256, 128), pt.nn.ReLU()
-                              , pt.nn.Linear(128, 64) , pt.nn.ReLU()
-                              , pt.nn.Linear(64 , 1)  )
+                              , pt.nn.Linear(dim, 400), pt.nn.ReLU()
+                              , pt.nn.Linear(400, 300), pt.nn.ReLU()
+                              , pt.nn.Linear(300, 1)  )
 
 ## Actor
 def actor_net(obs_dim: int, act_dim: int) = act_net where:
-    act_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 128)    , pt.nn.ReLU()
-                              , pt.nn.Linear(128    , 256)    , pt.nn.ReLU()
-                              , pt.nn.Linear(256    , 128)    , pt.nn.ReLU()
-                              , pt.nn.Linear(128    , 64)     , pt.nn.ReLU()
-                              , pt.nn.Linear(64     , act_dim), pt.nn.Tanh())
+    act_net = pt.nn.Sequential( pt.nn.Linear(obs_dim, 400)    , pt.nn.ReLU()
+                              , pt.nn.Linear(400    , 300)    , pt.nn.ReLU()
+                              , pt.nn.Linear(300    , act_dim), pt.nn.Tanh())
 
-def soft_update( source: pt.nn.Module, target: pt.nn.Module, τ: float = 1e-2
-               ) = target where:
-    for param, target_param in zip(source.parameters(), target.parameters()):
-        target_param.data.copy_(τ * param.data + (1 - τ) * target_param.data)
-
-data Model( Q1: pt.nn.Module, Q2: pt.nn.Module, π: pt.nn.Module
+## TD3 Agent
+data Agent( Q1: pt.nn.Module, Q2: pt.nn.Module, π: pt.nn.Module
           , θ1: pt.nn.Module, θ2: pt.nn.Module, φ: pt.nn.Module 
           , Q1_optim: pt.optim.Optimizer, Q2_optim: pt.optim.Optimizer
           , π_optim: pt.optim.Optimizer, Q_loss ):
-    def select_action(self, state: pt.Tensor, step: int) = action where:
-        with pt.no_grad():
-            action = state |> self.π |> add_noise$(?,t = step) |> .detach()
-    def eval_mode(self) = self where:
-        [ self.π, self.Q1, self.Q2, self.φ, self.θ1, self.θ2
-        ] |> fmap$(.to(device) .. .eval())
-    def train_mode(self) = self where:
-        [ self.π, self.Q1, self.Q2, self.φ, self.θ1, self.θ2
-        ] |> fmap$(.to(device) .. .train())
+    def save_state(self, checkpoint_file: str) = res where:
+        state_dicts = [ self.Q1, self.Q2, self.π, self.θ1, self.θ2, self.φ
+                      , self.Q1_optim, self.Q2_optim, self.π_optim 
+                      ] |> fmap$(.state_dict())
+        keys        = [ "Q1", "Q2", "pi", "T1", "T2", "phi"
+                      , "Q1_opt", "Q2_opt", "pi_opt" ]
+        save_dict   = (keys, state_dicts) |*> zip |> dict
+        res         = pt.save save_dict checkpoint_file
+    def load_state(self):
+        raise(NotImplementedError)
 
-def make_model(act_dim: int, obs_dim: int) = model where:
+def make_agent(act_dim: int, obs_dim: int) = agent where:
     Q1       = critic_net(obs_dim, act_dim) |> .to(device)
     Q2       = critic_net(obs_dim, act_dim) |> .to(device)
     π        = actor_net(obs_dim, act_dim)  |> .to(device)
@@ -125,130 +162,131 @@ def make_model(act_dim: int, obs_dim: int) = model where:
     _        = soft_update(Q1, θ1, τ = 1.0)
     _        = soft_update(Q2, θ2, τ = 1.0)
     _        = soft_update(π , φ , τ = 1.0)
-    Q1_optim = pt.optim.Adam(Q1.parameters(), lr = α, betas = βs)
-    Q2_optim = pt.optim.Adam(Q2.parameters(), lr = α, betas = βs)
-    π_optim  = pt.optim.Adam(π.parameters() , lr = α, betas = βs)
-    Q_loss   = pt.nn.MSELoss()
-    model    = Model(Q1, Q2, π, θ1, θ2, φ, Q1_optim, Q2_optim, π_optim, Q_loss)
+    Q1_optim = pt.optim.Adam(Q1.parameters(), lr = η, betas = βs)
+    Q2_optim = pt.optim.Adam(Q2.parameters(), lr = η, betas = βs)
+    π_optim  = pt.optim.Adam(π.parameters() , lr = η, betas = βs)
+    Q_loss   = pt.nn.functional.mse_loss
+    agent    = Agent Q1 Q2 π θ1 θ2 φ Q1_optim Q2_optim π_optim Q_loss
 
-## Exploitation
-def add_noise( a, t = 0, lo = -1.0, hi = 1.0, σ_max = 1.0, σ_min = 1.0, d = 1000000
-             ) = a_ where:
-    σ  = σ_max - (σ_max - σ_min) * min(1.0, t / d)
-    a_ = (a + pt.randn_like(a) * σ) |> pt.clip$(?, min = lo, max = hi)
+def soft_update( source: pt.nn.Module, target: pt.nn.Module, τ: float = 1e-2
+               ) = target where:
+    for param, target_param in zip(source.parameters(), target.parameters()):
+        target_param.data.copy_(τ * param.data + (1 - τ) * target_param.data)
 
 def random_action(envs) = action where:
-    action = envs.action_space |> fmap$(pt.from_numpy .. .sample()) \
+    action = envs.action_space |> map$(pt.from_numpy .. .sample()) |> list \
                                |> pt.vstack |> .detach() |> .to(device)
 
-def policy_update(epoch, model, states) = π_loss where:
-    π_loss = states |> model.π |> (,)$(states,?) |> model.Q1 |> .mean() |> (-)
-    _      = model.π_optim.zero_grad()
+## Update Policy
+def update_actor( iteration: int, epoch: int, agent: Agent, states: pt.Tensor
+                ) = π_loss where:
+    π_loss = states |> agent.π |> (,)$(states,?) |> agent.Q1 |> pt.mean |> (-)
+    _      = agent.π_optim.zero_grad()
     _      = π_loss.backward()
-    _      = model.π_optim.step()
-    _      = soft_update(model.Q1, model.θ1, τ = τ_soft)
-    _      = soft_update(model.Q2, model.θ2, τ = τ_soft)
-    _      = soft_update(model.π , model.φ , τ = τ_soft)
+    _      = agent.π_optim.step()
+    _      = soft_update(agent.Q1, agent.θ1, τ = τ_soft)
+    _      = soft_update(agent.Q2, agent.θ2, τ = τ_soft)
+    _      = soft_update(agent.π , agent.φ , τ = τ_soft)
     _      = writer.add_scalar("_Loss_π" , π_loss , epoch)
 
-def update(epoch, model, buffer) = (q1_loss, q2_loss, π_loss) where:
-    states, actions, rewards, next_states, dones \
-                 = buffer.sample(batch_size) |> fmap$(.to(device))
-    noise        = actions |> pt.zeros_like |> pt.normal$(?,pol_noise) \
-                           |> pt.clamp$(?,-clp_noise, clp_noise) |> .to(device)
-    next_actions = states |> model.φ |> (+)$(?,noise) |> pt.clamp$(?, -1.0, 1.0)
-    q1_target    = (next_states, next_actions) |> model.θ1
-    q2_target    = (next_states, next_actions) |> model.θ2
-    q_target     = pt.min(q1_target, q2_target)
-    q_expected   = (rewards + (1.0 - dones) * γ * q_target) |> .detach()
-    q1           = (states, actions) |> model.Q1
-    q2           = (states, actions) |> model.Q2
-    q1_loss      = model.Q_loss(q1, q_expected)
-    q2_loss      = model.Q_loss(q2, q_expected)
-    _            = model.Q1_optim.zero_grad()
-    _            = q1_loss.backward()
-    _            = model.Q1_optim.step()
-    _            = model.Q2_optim.zero_grad()
-    _            = q2_loss.backward()
-    _            = model.Q2_optim.step()
-    π_loss       = (if epoch in count(0, update_interval) 
-                       then policy_update(epoch, model, states)
-                       else pt.nan |> pt.tensor |> .to(device))
-    _            = writer.add_scalar("_Loss_Q1", q1_loss, epoch)
-    _            = writer.add_scalar("_Loss_Q2", q2_loss, epoch)
+def update_step( iteration, 0, agent, _, losses
+               ) =  (q1_loss, q2_loss, π_loss) where:
+    (q1_loss, q2_loss, π_loss_) = losses
+    π_loss = π_loss_[~π_loss_.isnan()]
+addpattern def update_step( iteration, epoch, agent, smpl, losses
+                          ) = update_step( iteration, epoch_, agent
+                                         , smpl, losses_ ) where:
+    states, actions, rewards, states_, dones = smpl
+    ε         = actions |> pt.zeros_like |> pt.normal$(?,σ_smpl) \
+                        |> pt.clamp$(?,-c, c) |> .to(device)
+    actions_  = (agent.φ(states_) + ε) |> pt.clamp$(?,-1.0, 1.0)
+    q1_target = (states_, actions_) |> agent.θ1
+    q2_target = (states_, actions_) |> agent.θ2
+    q_target  = pt.min q1_target q2_target
+    y         = (rewards + (1.0 - dones) * γ * q_target) |> .detach()
+    q1        = (states, actions) |> agent.Q1
+    q2        = (states, actions) |> agent.Q2
+    q1_loss   = agent.Q_loss q1 y
+    q2_loss   = agent.Q_loss q2 y
+    _         = agent.Q1_optim.zero_grad()
+    _         = q1_loss.backward()
+    _         = agent.Q1_optim.step()
+    _         = agent.Q2_optim.zero_grad()
+    _         = q2_loss.backward()
+    _         = agent.Q2_optim.step()
+    π_loss    = (if iteration in count(0, d) 
+                    then update_actor(iteration, epoch, agent, states)
+                    else pt.nan |> pt.tensor |> .to(device))
+    _         = writer.add_scalar("_Loss_Q1", q1_loss, iteration)
+    _         = writer.add_scalar("_Loss_Q2", q2_loss, iteration)
     #if verbose:
     #    print(f"Epoch {epoch:03} | Q Loss: {q1_loss:3f}, {q2_loss:3f}")
+    epoch_    = epoch - 1
+    losses_   = (q1_loss, q2_loss, π_loss) |> map$(.[None] .. .detach()) \
+              |> zip$(losses,?) |> map$(pt.cat) |> tuple
 
-## Exploration
-def postprocess(observations, keys: [str]) = states where:
-    idx = [ key |> filter$( (k) -> ":" not in k and "/" not in k
-                          , ?) |> map$((p) -> p |> key.index) |> list
-            for key in keys ] 
-    states = [ o[i] for o,i in zip(observations, idx)
-             ] |> fmap$(pt.from_numpy) |> pt.vstack |> .to(device)
+def update_policy( iteration: int, epochs: int, agent: Agent
+                 , buffer: ReplayBuffer ) = losses where:
+    smpl    = sample buffer batch_size
+    losses  = pt.empty(0, device = device) |> repeat |> .$[:3] |> tuple
+    losses_ = update_step iteration epochs agent smpl losses
 
-def explore( envs, model, step, states, buffer
-           ) = (next_states, new_buffer) where:
-    actions     = (if (step * len(envs)) < warmup_periode
-                      then random_action(envs)
-                      else model.select_action(states, step))
-    t0          = time.time()
-    observations,rewards_,dones_,infos \
-                = actions |> pt.split$(?,1) \
-                          |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
-                          |> list |> envs.step
-    next_states = postprocess(observations, [i["output-parameters"] for i in infos])
-    rewards     = rewards_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    dones       = dones_ |> pt.Tensor |> .to(device) |> .reshape(-1,1)
-    new_buffer  = (states, actions, rewards, next_states, dones) \
-                |*> ReplayBuffer |> buffer.push
-    t1          = time.time()
-    _           = writer.add_scalar("_Reward_Mean", rewards.mean().item(), step)
+## Evaluate Policy
+def evaluate_policy( iteration, 0, agent, envs, states, buffer) = (buffer,states)
+addpattern def evaluate_policy( iteration, step, agent, envs, states, buffer
+                              ) = evaluate_policy( iteration, step_, agent
+                                                 , envs, states_, buffer_ 
+                                                 ) where:
+    ε            = pt.distributions.Normal(0, σ_expl) |> .sample()
+    with pt.no_grad():
+        actions  = (if (iteration * len(envs)) < warmup_periode
+                       then random_action(envs)
+                       else (agent.π(states) + ε).detach() 
+                                |> pt.clamp$(?,-1.0, 1.0))
+    t0           = time.time()
+    observations_,rewards_,dones_,infos \
+                 = actions |> pt.split$(?,1) \
+                           |> fmap$(.numpy() .. .cpu() .. .squeeze()) \
+                           |> list |> envs.step
+    t1           = time.time()
+    keys         = infos[0]
+    observations = envs.reset(done_mask = dones_)
+    states_      = process_gace observations keys
+    rewards      = rewards_ |> pt.tensor |> .to(device) |> .reshape(-1,1)
+    dones        = ( pt.tensor(dones_, device = device, dtype = pt.int)
+                   ) |> .reshape(-1,1)
+    buffer_      = (states, actions, rewards, states_, dones) |> push$(buffer)
+    _            = writer.add_scalar("_Reward_Mean", rewards.mean().item(), step)
     if verbose:
-        print(f"Step {step:03} took {(t1 - t0):.3f}s  | Average Reward: {rewards.mean():.3f}")
-
-## Checkpoint Saving
-def save_checkpoint(model: Model, checkpoint_file: str) = res where:
-    state_dicts = [ model.Q1, model.Q2, model.π, model.θ1, model.θ2, model.φ
-                  , model.Q1_optim, model.Q2_optim ] |> fmap$(.state_dict())
-    keys        = [ "Q1", "Q2", "pi", "T1", "T2", "phi"
-                  , "Q1_opt", "Q2_opt", "pi_opt" ]
-    save_dict   = (keys, state_dicts) |*> zip |> dict
-    res         = pt.save(save_dict, checkpoint_file)
+        dt       = (t1 - t0)
+        print(f"{iteration:03}/{step:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}")
+        if any(dones_):
+            de   = [i for i,d in enumerate(dones_) if d]
+            print(f"\tEnvironments {de} are done in Iteration {iteration:03}.")
+    step_        = step - 1
 
 ## Run Episode until done
-def run_episode(_, model, episode, _, _, buffer, True) = model where:
-    total   = buffer.reward |> .sum() |> .item()
+def run_algorithm(_, agent, episode, _, _, buffer, True) = agent where:
+    total   = buffer.reward |> pt.sum |> .item()
     _       = writer.add_scalar(f"_Reward_Total", total, episode)
     if verbose:
         f"Episode {episode:03} Finished | Total Reward: {total}" |> print
-addpattern def run_episode( envs, model, episode, iteration, states, buffer, done
-                          ) = run_episode( envs, model, episode, iteration + 1
-                                         , next_states, new_buffer, finish 
-                                         ) where:
-    _      = model.eval_mode()
-    expl   = (sb, e) -> sb |*> explore$(envs, model, e, ?)
-    steps  = range(iteration, iteration + num_steps)
-    next_states, new_buffer \
-           = reduce(expl, steps, (states, buffer))
-    done_  = .item() .. pt.all .. .bool() .. .squeeze() .. .done <| new_buffer
-    last   = len(envs) + num_steps
-    stop_  = new_buffer.reward[-last:].mean().item() < early_stop
-    finish = done_ or stop_ or (iteration >= num_iters)
-    _      = model.train_mode()
-    q1_loss, q2_loss, π_loss_ \
-           = [ update(epoch, model, new_buffer) 
-               for epoch in num_epochs |> range 
-             ]  |*> zip |> fmap$pt.hstack |> tuple
-    π_loss = π_loss_[~π_loss_.isnan()]
+addpattern def run_algorithm( envs, agent, episode, iteration, states, buffer, done
+                          ) = run_algorithm( envs, agent, episode, iteration + 1
+                                           , states_, buffer_, done 
+                                           ) where:
+    buffer_, states_ \
+           = evaluate_policy iteration num_steps agent envs states buffer
+    if len(buffer) > batch_size:
+        losses = update_policy iteration num_epochs agent buffer
+    done   = iteration >= num_iterations
     _      = envs$[0] |> write_performance$(?, iteration)
 
-def run_episodes( model: Model, envs: gace.envs.vec.VecACE, episode: int
-                ) = model where:
+def run_episode( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
+               ) = agent where:
     obs     = envs.reset()
-    states  = postprocess(obs, envs.info[0]["output-parameters"])
-    buffer  = pt.empty(0) |> repeat |> .$[:5] |> tuple |*> ReplayBuffer
-    memory  = run_episode(envs, model, episode, 0, states, buffer, False)
-    _       = model.eval_mode()
-    _       = save_checkpoint(model, model_path)
-
+    keys    = envs.info[0]
+    states  = process_gace obs keys
+    buffer  = empty_buffer()
+    memory  = run_algorithm(envs, agent, episode, 0, states, buffer, False)
+    _       = agent.save_state model_path

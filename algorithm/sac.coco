@@ -16,7 +16,7 @@ num_steps: int       = 1               # How many steps to take in env
 num_epochs:int       = 1               # How many gradient update steps
 num_iterations: int  = 150             # Number of iterations
 early_stop: float    = -500.0          # Early stop criterion
-batch_size: int      = 256             # size of the batches during epoch
+batch_size: int      = 128             # size of the batches during epoch
 rng_seed: int        = 666             # Random seed for reproducability
 max_time: float      = 20.0            # Maximum time to cut off
 
@@ -44,8 +44,8 @@ buffer_size: int     = 1e6 |> int      # Maximum size of replay buffer
 ## NN Optimizer
 w_init: float        = 3e-3            # Initial weight limit
 η_π: float           = 1e-4            # Learning Rate for Actor
-η_q: float           = 3e-4            # Learning Rate for Critic
-η_α: float           = 3e-4            # Learning Rate for Critic
+η_q: float           = 2e-4            # Learning Rate for Critic
+η_α: float           = 2e-4            # Learning Rate for Critic
 βs: tuple[float]     = (β1, β2) where: # Betas
     β1: float        = 0.9      # 0.9
     β2: float        = 0.999    # 0.999
@@ -107,24 +107,30 @@ def process_gym(observations) = states where:
              ] |> pt.vstack |> .to(device)
 
 def process_gace(observations, keys: dict[str, [list [str]]]) = states where:
+    fl     = ["ugbw", "cof", "sr_f", "sr_r"]
     ok     = [ k for k in keys['observations'] 
                if (k[0].islower() or (k in keys['actions'])) 
-                  and ("steps" not in k)
+                  and ("max-steps" not in k)
                   and not k.startswith('vn_')]
     idx    = [keys['observations'].index(m) for m in ok]
     idx_i  = [ok.index(i) for i in ok if i.startswith('i') or i.endswith(':id')]
-    fl     = ["ugbw", "cof", "sr_f", "sr_r"]
+    idx_v  = [ok.index(v) for v in ok if v.startswith('voff_')]
     idx_f  = [ ok.index(f) for f in ok 
                if (not f.startswith('delta_') 
                    and (filter((f_) -> (f_ in f), fl) |> list |> any)) 
                   or f.endswith(':fug') ]
     msk_i  = [ i in idx_i for i in (ok |> len |> range) 
              ] |> pt.tensor$(?, dtype = pt.bool)
+    msk_v  = [ v in idx_v for v in (ok |> len |> range) 
+             ] |> pt.tensor$(?, dtype = pt.bool)
     msk_f  = [ f in idx_f for f in (ok |> len |> range) 
              ] |> pt.tensor$(?, dtype = pt.bool)
     obs    = observations |> map$(pt.from_numpy) |> list |> pt.vstack |> .[:,idx] 
-    states = obs |> pt.where$(msk_f, (obs |> pt.abs |> pt.log10), ?) \
-                 |> pt.where$(msk_i, obs * 1e6, ?) |> pt.nan_to_num |> .to(device)
+    obs_   = obs |> pt.where$(msk_f, (obs |> pt.abs |> pt.log10), ?) \
+                 |> pt.where$(msk_i, obs * 1e6, ?)
+                 #|> pt.where$(msk_v, obs * 1e6, ?)  \
+    states = obs_ |> pt.nan_to_num$(?, nan = 0.0, posinf = 0.0, neginf = 0.0) \
+                  |> .to(device)
 
 def scale_rewards(reward: pt.Tensor, ρ: float = 1e-3) = scaled_reward where:
     scaled_reward = (reward - pt.mean(reward)) / (pt.std(reward) + ρ)
@@ -229,7 +235,6 @@ data Agent( π_online: pt.nn.Module, π_optim: pt.optim.Optimizer
           , H_target: float, π_prior: Callable
           , α_log: pt.Tensor, α_optim: pt.optim.Optimizer ):
     def save_state(self, checkpoint_file: str) = res where:
-
         nets = [ self.π_online, self.q1_online, self.q2_online, self.q1_target
                , self.q2_target ]
         opts = [ self.π_optim, self.q1_optim, self.q2_optim , self.α_optim ]
@@ -240,9 +245,10 @@ data Agent( π_online: pt.nn.Module, π_optim: pt.optim.Optimizer
         d    = [ "actor_online", "critic_1_online", "critic_2_online"
                , "critic_1_target", "critic_2_target", "actor_optim"
                , "critic_1_optim", "critic_2_optim", "alpha_optim", "alpha_log"]
-        res  = (d,m) |*> zip |> dict |> pt.save$(?, checkpoint_file)
         _    = nets |> map$(.to(device) .. .train()) |> list
         _    = tens |> map$(.to(device)) |> list
+        dic  = (d,m) |*> zip |> dict 
+        res  = pt.save dic checkpoint_file
     def load_state(self):
         raise(NotImplementedError)
 
@@ -386,14 +392,12 @@ addpattern def evaluate_step( iteration, step, agent, envs, buffer, states, iter
     _           = writer.add_scalar("_Reward_Mean", rewards |> pt.mean, iteration)
     _           = envs$[0] |> write_performance$(?, iteration)
     states_     = (if any(dones_)
-                      then envs.reset(done_mask = dones_)
+                      then envs.reset(done_mask = dones_) |> process_gace$(?,keys)
+                      #then envs.reset(done_mask = dones_) |> process_gym
                       else _states)
     #states_     = if any(dones) then envs.reset() else _states
     if verbose and (iteration in count(0, 10)):
-        _       = print(f"Environment Step took {dt} s.")
-        if any(dones_):
-            d_  = [i for i,d in enumerate dones_ if d]
-            _   = print(f"Environments {d_} done, resetting")
+        _       = print(f"Environment Step took {dt:.3f} s.")
 
 def evaluate_policy( iteration: int, agent: Agent, envs: gace.envs.vec.VecACE
                    , buffer: ReplayBuffer, states: pt.Tensor
@@ -433,12 +437,12 @@ addpattern def run_algorithm( episode, iteration, agent, envs, done, buffer
                |> memories.done$[] |> pt.squeeze |> .to(pt.bool) |> .tolist()
     if verbose and any(dones):
         de     = [i for i,d in enumerate(dones) if d]
-        _      = print(f"Environments {de} are done!")
+        _      = print(f"Environments {de} are done in Iteration {iteration:03}.")
     done_      = (iteration >= num_iterations) or all(dones)
     _          = model_path |> agent.save_state
 
-def run_episodes( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
-                ) = agent where:
+def run_episode( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
+               ) = agent where:
     obs    = envs.reset()
     keys   = envs.info[0]
     states = process_gace obs keys

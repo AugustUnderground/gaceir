@@ -5,18 +5,13 @@ import hace as ac
 import gym, gace
 from hy.contrib.pprint import pp
 
-#import algorithm.ppo as ppo
-#import algorithm.td3 as td3
-import algorithm.sac as sac
-#import algorithm.std as std
-
 ## Environment setup
 ace_id: str      = "op2"
 ace_backend: str = "xh035"
 ace_variant: int = 0
 env_id: str      = f"gace:{ace_id}-{ace_backend}-v{ace_variant}"
 num_envs: int    = 20 # 50
-obs_dim: int     = 50
+obs_dim: int     = 47
 act_dim: int     = 10
 
 envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
@@ -24,50 +19,20 @@ envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
 #act_dim: int               = envs.action_space[0].shape[0]
 #obs_dim: int               = envs$[0].target |> len |> (*)$(3) |> (+)$(2)
 
-#o_ = envs.reset()
-#o,r,d,i = envs.random_step()
-#s = sac.process_gace(o,i[0])
-
-def run(episode: int, run_fun) = results where:
-    print(f"Starting Episode {episode} run ...")
-    results = run_fun(envs, episode)
-    print(f"Finished Episode {episode}.")
-
 ## SAC
-agent: sac.Agent = sac.make_agent(act_dim, obs_dim)
-acid = [run(eps, sac.run_episodes$(agent)) for eps in range(sac.num_episodes)] |*> zip |> tuple
-#mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
+import algorithm.sac as sac
+agent: sac.Agent = sac.make_agent act_dim obs_dim
+acid = [sac.run_episode(agent, envs, eps) for eps in range(sac.num_episodes)] |*> zip |> tuple
+#acid = [sac.run_episode(agent, envs, eps) for eps in range(2)] |*> zip |> tuple
 
-## Run Wrapper Deleting and Recreating the Environment
-#def run(episode: int, run_fun) = results where:
-#    global envs
-#    print(f"Starting Episode {episode} run ...")
-#    try:
-#        results = run_fun(envs, episode)
-#    except ac.AcePoolCorruptionException as err:
-#        print(f"Episode {episode} stopped early due to error\n\t{err}\nResetting ...")
-#        envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
-#        results = None
-#    else:
-#        print(f"Finished Episode {episode}.")
-#    if episode in count(0,3):
-#        print(f"Restarting Environments after {episode} Episodes.")
-#        del envs
-#        time.sleep(3.0)
-#        envs: gace.envs.vec.VecACE = gace.vector_make_same(env_id, num_envs)
+## TD3
+import algorithm.td3 as td3
+agent: td3.Agent = td3.make_agent act_dim obs_dim
+acid = [td3.run_episode(agent, envs, eps) for eps in range(td3.num_episodes)] |*> zip |> tuple
+#acid = [td3.run_episode(agent, envs, eps) for eps in range(2)] |*> zip |> tuple
 
 ## PPO
-#model: ppo.Model = ppo.make_model(act_dim, obs_dim, ppo.act_std)
-#mdl = [run(eps, ppo.run_episodes$(model)) for eps in range(ppo.num_episodes)] |*> zip |> tuple
-##mdl = [run(eps, ppo.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
-
-### TD3
-#model: td3.Model = td3.make_model(act_dim, obs_dim)
-#mdl = [run(eps, td3.run_episodes$(model)) for eps in range(td3.num_episodes)] |*> zip |> tuple
-##mdl = [run(eps, td3.run_episodes$(model)) for e in range(2)] |*> zip |> tuple
-##mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
-
-### STD
-#model: std.Model = std.make_model(act_dim, obs_dim)
-#mdl = [run(eps, std.run_episodes$(model)) for eps in range(std.num_episodes)] |*> zip |> tuple
-##mdl = [sac.run_episodes(model, envs, eps) for eps in range(2)] |*> zip |> tuple
+import algorithm.ppo as ppo
+agent: ppo.Agent = ppo.make_agent act_dim obs_dim
+acid = [ppo.run_episode(agent, envs, eps) for eps in range(ppo.num_episodes)] |*> zip |> tuple
+#acid = [ppo.run_episode(agent, envs, eps) for eps in range(2)] |*> zip |> tuple
