@@ -229,7 +229,7 @@ def evaluate_policy( iteration, agent, envs, states
     t1                = time.time()
     r                 = memories_.rewards |> pt.mean
     dt                = t1 - t0
-    if verbose:
+    if verbose and (iteration in count(0, 10)):
         print(f"Iteration {iteration:03} took {dt:.3f}s | Average Reward: {r:.3f}")
     _                 = writer.add_scalar("_Reward_Mean", r, iteration)
     _                 = envs$[0] |> write_performance$(?, iteration)

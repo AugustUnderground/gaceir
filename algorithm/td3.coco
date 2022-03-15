@@ -257,7 +257,7 @@ addpattern def evaluate_policy( iteration, step, agent, envs, states, buffer
                    ) |> .reshape(-1,1)
     buffer_      = (states, actions, rewards, states_, dones) |> push$(buffer)
     _            = writer.add_scalar("_Reward_Mean", rewards.mean().item(), step)
-    if verbose:
+    if verbose and (iteration in count(0, 10)):
         dt       = (t1 - t0)
         print(f"{iteration:03}/{step:03} took {dt:.3f}s | Average Reward: {rewards.mean():.3f}")
         if any(dones_):
@@ -272,15 +272,16 @@ def run_algorithm(_, agent, episode, _, _, buffer, True) = agent where:
     if verbose:
         f"Episode {episode:03} Finished | Total Reward: {total}" |> print
 addpattern def run_algorithm( envs, agent, episode, iteration, states, buffer, done
-                          ) = run_algorithm( envs, agent, episode, iteration + 1
+                          ) = run_algorithm( envs, agent, episode, iteration_
                                            , states_, buffer_, done 
                                            ) where:
     buffer_, states_ \
-           = evaluate_policy iteration num_steps agent envs states buffer
+               = evaluate_policy iteration num_steps agent envs states buffer
     if len(buffer) > batch_size:
         losses = update_policy iteration num_epochs agent buffer
-    done   = iteration >= num_iterations
-    _      = envs$[0] |> write_performance$(?, iteration)
+    done       = iteration >= num_iterations
+    _          = envs$[0] |> write_performance$(?, iteration)
+    iteration_ = iteration + 1
 
 def run_episode( agent: Agent, envs: gace.envs.vec.VecACE, episode: int
                ) = agent where:
